@@ -90,7 +90,6 @@ struct list
     int gain;
 
     struct user* head;
-    struct user* tail;
 };
 
 struct thread_data
@@ -129,6 +128,7 @@ int main(int argc, char* argv[])
     server.password = NULL;
     server.maxusers = DEFAULT_USERS;
     server.online = 0;
+    server.head = NULL;
 
 #ifdef __WIN32__
     WSADATA wsaData;
@@ -688,21 +688,17 @@ struct user* list_add(struct list* LIST, int fd, int auth)
     struct user* new = malloc(sizeof(struct user));
     new->fd = fd;
     new->auth = auth;
-    new->next = NULL;
-    new->prev = LIST->tail;
+    new->prev = NULL;
 
     pthread_mutex_lock(&LIST->mutex);
+    new->next = LIST->head;
     if(LIST->head)
     {
-        (LIST->tail)->next = new;
+        (LIST->head)->prev = new;
     }
-    else
-    {
-        LIST->head = new;
-    }
-    LIST->tail = new;
-    pthread_mutex_unlock(&LIST->mutex);
+    LIST->head = new;
     LIST->online++;
+    pthread_mutex_unlock(&LIST->mutex);
 
     return new;
 }
@@ -712,7 +708,7 @@ void list_remove(struct list* LIST, struct user* USER)
     pthread_mutex_lock(&LIST->mutex);
     if(USER->prev)
     {
-        USER->prev->next = USER->next;
+        (USER->prev)->next = USER->next;
     }
     else
     {
@@ -720,13 +716,10 @@ void list_remove(struct list* LIST, struct user* USER)
     }
     if(USER->next)
     {
-        USER->next->prev = USER->prev;
-    }
-    else
-    {
-        LIST->tail = USER->prev;
+        (USER->next)->prev = USER->prev;
     }
     pthread_mutex_unlock(&LIST->mutex);
+
 #ifdef __WIN32__
     closesocket(USER->fd);
 #else
