@@ -53,7 +53,7 @@
 #define DEFAULT_PORT   7373
 #define DEFAULT_USERS  10
 #define SERIAL_BUFFER  8192
-#define VERSION        "0.1"
+#define VERSION        "0.1.1"
 
 struct user
 {
