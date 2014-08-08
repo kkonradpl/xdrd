@@ -1,5 +1,5 @@
 /*
- *  xdrd 0.1
+ *  xdrd 0.1.1
  *  Copyright (C) 2013-2014  Konrad Kosmatka
  *  http://redakcja.radiopolska.pl/konrad/
 
@@ -34,6 +34,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #define MSG_NOSIGNAL 0
+#define strcasecmp _stricmp
 #else
 #include <termios.h>
 #include <syslog.h>
@@ -88,6 +89,9 @@ struct list
     int filter;
     int ant;
     int gain;
+    int daa;
+    int squelch;
+    int rotator;
 
     struct user* head;
 };
@@ -382,7 +386,7 @@ void* server_conn(void* t_data)
 
     struct user *u;
     fd_set input;
-    char buffer[50], c;
+    char buffer[100], c;
     int pos = 0, auth = 0;
 
     free(t_data);
@@ -402,6 +406,7 @@ void* server_conn(void* t_data)
         snprintf(buffer, sizeof(buffer), "a0\n");
         send(connfd, buffer, strlen(buffer), MSG_NOSIGNAL);
 #ifdef __WIN32__
+        Sleep(2000);
         closesocket(connfd);
 #else
         close(connfd);
@@ -425,8 +430,8 @@ void* server_conn(void* t_data)
     fcntl(connfd, F_SETFL, O_NONBLOCK);
 #endif
 
-    snprintf(buffer, sizeof(buffer), "OK\nM%d\nY%d\nT%d\nD%d\nA%d\nF%d\nZ%d\nG%02d\n",
-             server.mode, server.volume, server.freq, server.deemphasis, server.agc, server.filter, server.ant, server.gain);
+    snprintf(buffer, sizeof(buffer), "OK\nM%d\nY%d\nT%d\nD%d\nA%d\nF%d\nZ%d\nG%02d\nV%d\nQ%d\nC%d\n",
+             server.mode, server.volume, server.freq, server.deemphasis, server.agc, server.filter, server.ant, server.gain, server.daa, server.squelch, server.rotator);
     send(connfd, buffer, strlen(buffer), MSG_NOSIGNAL);
 
     u = list_add(&server, connfd, auth);
@@ -718,6 +723,7 @@ void list_remove(struct list* LIST, struct user* USER)
     {
         (USER->next)->prev = USER->prev;
     }
+    LIST->online--;
     pthread_mutex_unlock(&LIST->mutex);
 
 #ifdef __WIN32__
@@ -726,7 +732,6 @@ void list_remove(struct list* LIST, struct user* USER)
     close(USER->fd);
 #endif
     free(USER);
-    LIST->online--;
 }
 
 void msg_parse_client(char* msg, int fd)
@@ -748,7 +753,7 @@ void msg_parse_client(char* msg, int fd)
 
     case 'Y':
         n = atoi(msg+1);
-        if(n >= 0 && n <= 2047)
+        if(n >= 0 && n <= 100)
         {
             server.volume = n;
             snprintf(buff, sizeof(buff), "Y%d\n", server.volume);
@@ -805,6 +810,36 @@ void msg_parse_client(char* msg, int fd)
             msg_send(buff, strlen(buff), fd);
         }
         break;
+
+    case 'V':
+        n = atoi(msg+1);
+        if(n >= 0 && n < 128)
+        {
+            server.daa = n;
+            snprintf(buff, sizeof(buff), "V%d\n", server.daa);
+            msg_send(buff, strlen(buff), fd);
+        }
+        break;
+
+    case 'Q':
+        n = atoi(msg+1);
+        if(n >= 0 && n <= 100)
+        {
+            server.squelch = n;
+            snprintf(buff, sizeof(buff), "Q%d\n", server.squelch);
+            msg_send(buff, strlen(buff), fd);
+        }
+        break;
+
+    case 'C':
+        n = atoi(msg+1);
+        if(n >= 0 && n <= 2)
+        {
+            server.rotator = n;
+            snprintf(buff, sizeof(buff), "C%d\n", server.rotator);
+            msg_send(buff, strlen(buff), fd);
+        }
+        break;
     }
 }
 
@@ -818,6 +853,14 @@ void msg_parse_serial(char* msg)
 
     case 'T':
         server.freq = atoi(msg+1);
+        break;
+
+    case 'V':
+        server.daa = atoi(msg+1);
+        break;
+
+    case 'C':
+        server.rotator = atoi(msg+1);
         break;
     }
 }
@@ -873,7 +916,7 @@ int auth_hash(char* salt, char* password, char* hash)
         sprintf(sha_string+(i*2), "%02x", sha[i]);
     }
 
-    return (strcmp(hash, sha_string) == 0);
+    return (strcasecmp(hash, sha_string) == 0);
 }
 
 void tuner_defaults()
@@ -885,4 +928,7 @@ void tuner_defaults()
     server.agc = 2;
     server.filter = -1;
     server.gain = 0;
+    server.daa = 0;
+    server.squelch = 0;
+    server.rotator = 0;
 }
