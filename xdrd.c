@@ -1,5 +1,5 @@
 /*
- *  xdrd 0.1.1
+ *  xdrd 0.1.2
  *  Copyright (C) 2013-2014  Konrad Kosmatka
  *  http://redakcja.radiopolska.pl/konrad/
 
@@ -35,6 +35,7 @@
 #include <ws2tcpip.h>
 #define MSG_NOSIGNAL 0
 #define strcasecmp _stricmp
+#define DEFAULT_SERIAL "COM3"
 #else
 #include <termios.h>
 #include <syslog.h>
@@ -42,28 +43,40 @@
 #include <sys/socket.h>
 #include <sys/select.h>
 #include <sys/ioctl.h>
-#endif
-
-#ifdef __WIN32__
-#define DEFAULT_SERIAL "COM3"
-#else
+#define closesocket(x) close(x)
 #define DEFAULT_SERIAL "/dev/ttyUSB0"
 #endif
 
 #define DEFAULT_PORT   7373
 #define DEFAULT_USERS  10
 #define SERIAL_BUFFER  8192
-#define VERSION        "0.1.1"
+#define VERSION        "0.1.2"
 
-struct user
+#define RDS_BUFF_RDS_LEN sizeof("xxxxyyyyzzzz00")
+#define RDS_BUFF_PI_LEN  sizeof("xxxx?")
+#define RDS_BUFF_STATE_EMPTY 0
+#define RDS_BUFF_STATE_PI    1
+#define RDS_BUFF_STATE_RDS   2
+#define RDS_BUFF_STATE_PIRDS 3
+#define RDS_BUFF_STATE_RDSPI 4
+
+typedef struct rds_buffer
+{
+    int state;
+    char pi[RDS_BUFF_PI_LEN];
+    char rds[RDS_BUFF_RDS_LEN];
+} rds_buffer_t;
+
+typedef struct user
 {
     int fd;
     int auth;
     struct user* next;
     struct user* prev;
-};
+} user_t;
 
-struct list
+
+typedef struct server
 {
 #ifdef __WIN32__
     HANDLE serialfd;
@@ -79,6 +92,7 @@ struct list
     int poweroff; // power tuner off when nobody is connected
 
     int online; // online users counter
+    int online_auth;
 
     // tuner settings
     int mode;
@@ -93,16 +107,18 @@ struct list
     int squelch;
     int rotator;
 
-    struct user* head;
-};
+    rds_buffer_t rds;
 
-struct thread_data
+    struct user* head;
+} server_t;
+
+typedef struct thread
 {
     int fd;
     char* salt;
-};
+} thread_t;
 
-struct list server;
+server_t server;
 
 void show_usage(char*);
 void error(char*);
@@ -112,10 +128,10 @@ void* server_conn(void*);
 void serial_init(char*);
 void serial_loop();
 void serial_write(char*, int);
-struct user* list_add(struct list*, int, int);
-void list_remove(struct list*, struct user*);
+struct user* user_add(server_t*, int, int);
+void user_remove(server_t*, user_t*);
 void msg_parse_client(char*, int);
-void msg_parse_serial(char*);
+int msg_parse_serial(char*);
 void msg_send(char*, int, int);
 char* auth_salt();
 int auth_hash(char*, char*, char*);
@@ -132,6 +148,7 @@ int main(int argc, char* argv[])
     server.password = NULL;
     server.maxusers = DEFAULT_USERS;
     server.online = 0;
+    server.online_auth = 0;
     server.head = NULL;
 
 #ifdef __WIN32__
@@ -260,13 +277,9 @@ void show_usage(char* arg)
     printf("xdrd %s\n", VERSION);
     printf("usage: %s [ -s serial ] [ -t port ] [ -u users ] [ -p password ] [ -hgxb ]\n", arg);
     printf("options:\n");
-#ifdef __WIN32__
-    printf("  -s  serial port (default COM3)\n");
-#else
-    printf("  -s  serial port (default ttyUSB0)\n");
-#endif
-    printf("  -t  tcp/ip port (default 7373)\n");
-    printf("  -u  max users   (default 10)\n");
+    printf("  -s  serial port (default %s)\n", DEFAULT_SERIAL);
+    printf("  -t  tcp/ip port (default %d)\n", DEFAULT_PORT);
+    printf("  -u  max users   (default %d)\n", DEFAULT_USERS);
     printf("  -p  specify password (required)\n");
     printf("  -h  show this help list\n");
     printf("  -g  allow guest login (read-only access)\n");
@@ -294,6 +307,8 @@ void error(char* msg)
 void server_init(int port)
 {
     int sockfd;
+    struct sockaddr_in addr;
+    pthread_t thread;
 
     if((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
     {
@@ -308,7 +323,6 @@ void server_init(int port)
     }
 #endif
 
-    struct sockaddr_in addr;
     memset((char*)&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -326,10 +340,7 @@ void server_init(int port)
 
     tuner_defaults();
 
-    pthread_t thread;
-    int* sock = (int*)malloc(sizeof(int));
-    *sock = sockfd;
-    if(pthread_create(&thread, NULL, server_thread, (void*)sock))
+    if(pthread_create(&thread, NULL, server_thread, (void*)(long)sockfd))
     {
         error("server_init: pthread_create");
     }
@@ -340,32 +351,29 @@ void* server_thread(void* sockfd)
     pthread_t thread;
     pthread_attr_t attr;
     int connfd;
+    thread_t *t_data;
+
+    if(pthread_attr_init(&attr))
+    {
+        error("server_thread: pthread_attr_init");
+    }
+
+    if(pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED))
+    {
+        error("server_thread: pthread_attr_setdetachstate");
+    }
 
     srand((unsigned)time(NULL));
 
-    while((connfd = accept(*((int*)sockfd), (struct sockaddr*)NULL, NULL)) >= 0)
+    while((connfd = accept((int)(long)sockfd, (struct sockaddr*)NULL, NULL)) >= 0)
     {
         if(server.online >= server.maxusers)
         {
-#ifdef __WIN32__
             closesocket(connfd);
-#else
-            close(connfd);
-#endif
             continue;
         }
 
-        if(pthread_attr_init(&attr))
-        {
-            error("server_thread: pthread_attr_init");
-        }
-
-        if(pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED))
-        {
-            error("server_thread: pthread_attr_setdetachstate");
-        }
-
-        struct thread_data *t_data = malloc(sizeof(struct thread_data));
+        t_data = malloc(sizeof(thread_t));
         t_data->fd = connfd;
         t_data->salt = auth_salt();
         if(pthread_create(&thread, &attr, server_conn, (void*)t_data))
@@ -374,15 +382,15 @@ void* server_thread(void* sockfd)
         }
     }
 
-    free(sockfd);
+    pthread_attr_destroy(&attr);
     error("server_thread: accept");
     return NULL;
 }
 
 void* server_conn(void* t_data)
 {
-    int connfd = ((struct thread_data*)t_data)->fd;
-    char* salt = ((struct thread_data*)t_data)->salt;
+    int connfd = ((thread_t*)t_data)->fd;
+    char* salt = ((thread_t*)t_data)->salt;
 
     struct user *u;
     fd_set input;
@@ -407,10 +415,8 @@ void* server_conn(void* t_data)
         send(connfd, buffer, strlen(buffer), MSG_NOSIGNAL);
 #ifdef __WIN32__
         Sleep(2000);
-        closesocket(connfd);
-#else
-        close(connfd);
 #endif
+        closesocket(connfd);
         return NULL;
     }
 
@@ -434,7 +440,7 @@ void* server_conn(void* t_data)
              server.mode, server.volume, server.freq, server.deemphasis, server.agc, server.filter, server.ant, server.gain, server.daa, server.squelch, server.rotator);
     send(connfd, buffer, strlen(buffer), MSG_NOSIGNAL);
 
-    u = list_add(&server, connfd, auth);
+    u = user_add(&server, connfd, auth);
 
     snprintf(buffer, sizeof(buffer), "o%d\n", server.online);
     msg_send(buffer, strlen(buffer), -1);
@@ -476,14 +482,20 @@ void* server_conn(void* t_data)
         pos = 0;
     }
 
-    list_remove(&server, u);
+    user_remove(&server, u);
     if(server.online)
     {
         snprintf(buffer, sizeof(buffer), "o%d\n", server.online);
         msg_send(buffer, strlen(buffer), -1);
     }
-    else if(server.poweroff)
+    if(!server.online_auth && server.poweroff)
     {
+        if(server.online)
+        {
+            // tell unauthenticated users that XDR is powered off
+            sprintf(buffer, "X\n");
+            msg_send(buffer, strlen(buffer), -1);
+        }
         pthread_mutex_lock(&server.mutex_s);
 #ifdef __WIN32__
         // restart Arduino using RTS & DTR lines
@@ -504,8 +516,8 @@ void* server_conn(void* t_data)
             ioctl(server.serialfd, TIOCMSET, &ctl);
         }
 #endif
-        pthread_mutex_unlock(&server.mutex_s);
         tuner_defaults();
+        pthread_mutex_unlock(&server.mutex_s);
     }
     return NULL;
 }
@@ -521,6 +533,7 @@ void serial_init(char* path)
     DCB dcbSerialParams = {0};
     if(!GetCommState(server.serialfd, &dcbSerialParams))
     {
+        CloseHandle(server.serialfd);
         error("serial_init: GetCommState");
     }
     dcbSerialParams.BaudRate = CBR_115200;
@@ -529,6 +542,7 @@ void serial_init(char* path)
     dcbSerialParams.Parity = NOPARITY;
     if(!SetCommState(server.serialfd, &dcbSerialParams))
     {
+        CloseHandle(server.serialfd);
         error("serial_init: SetCommState");
     }
 #else
@@ -543,10 +557,12 @@ void serial_init(char* path)
     struct termios options;
     if(tcgetattr(server.serialfd, &options))
     {
+        close(server.serialfd);
         error("serial_init: tcgetattr");
     }
     if(cfsetispeed(&options, B115200) || cfsetospeed(&options, B115200))
     {
+        close(server.serialfd);
         error("serial_init: cfsetspeed");
     }
     options.c_iflag &= ~(BRKINT | ICRNL | IXON | IMAXBEL);
@@ -558,6 +574,7 @@ void serial_init(char* path)
     options.c_cflag &= ~(CRTSCTS);
     if(tcsetattr(server.serialfd, TCSANOW, &options))
     {
+        close(server.serialfd);
         error("serial_init: tcsetattr");
     }
 #endif
@@ -565,7 +582,7 @@ void serial_init(char* path)
 
 void serial_loop()
 {
-    char c, buff[SERIAL_BUFFER];
+    char c, buff[SERIAL_BUFFER], buffered[100];
     int pos = 0;
 
 #ifdef __WIN32__
@@ -643,10 +660,37 @@ void serial_loop()
         }
 
         buff[pos] = 0;
-        msg_parse_serial(buff);
+        if(msg_parse_serial(buff))
+        {
+            buff[pos] = '\n';
+            msg_send(buff, pos+1, -1);
+        }
+        else if(buff[0] == 'S') // print RDS buffers
+        {
+            switch(server.rds.state)
+            {
+                case RDS_BUFF_STATE_PI:
+                    snprintf(buffered, sizeof(buffered), "P%s\n%s\n", server.rds.pi, buff);
+                    msg_send(buffered, strlen(buffered), -1);
+                    break;
 
-        buff[pos] = '\n';
-        msg_send(buff, pos+1, -1);
+                case RDS_BUFF_STATE_RDS:
+                    snprintf(buffered, sizeof(buffered), "R%s\n%s\n", server.rds.rds, buff);
+                    msg_send(buffered, strlen(buffered), -1);
+                    break;
+
+                case RDS_BUFF_STATE_PIRDS:
+                    snprintf(buffered, sizeof(buffered), "P%s\nR%s\n%s\n", server.rds.pi, server.rds.rds, buff);
+                    msg_send(buffered, strlen(buffered), -1);
+                    break;
+
+                case RDS_BUFF_STATE_RDSPI:
+                    snprintf(buffered, sizeof(buffered), "R%s\nP%s\n%s\n", server.rds.rds, server.rds.pi, buff);
+                    msg_send(buffered, strlen(buffered), -1);
+                    break;
+            }
+            server.rds.state = RDS_BUFF_STATE_EMPTY;
+        }
 
         pos = 0;
     }
@@ -688,7 +732,7 @@ void serial_write(char* msg, int len)
     pthread_mutex_unlock(&server.mutex_s);
 }
 
-struct user* list_add(struct list* LIST, int fd, int auth)
+struct user* user_add(server_t* LIST, int fd, int auth)
 {
     struct user* new = malloc(sizeof(struct user));
     new->fd = fd;
@@ -703,12 +747,13 @@ struct user* list_add(struct list* LIST, int fd, int auth)
     }
     LIST->head = new;
     LIST->online++;
+    LIST->online_auth += auth;
     pthread_mutex_unlock(&LIST->mutex);
 
     return new;
 }
 
-void list_remove(struct list* LIST, struct user* USER)
+void user_remove(server_t* LIST, struct user* USER)
 {
     pthread_mutex_lock(&LIST->mutex);
     if(USER->prev)
@@ -724,13 +769,10 @@ void list_remove(struct list* LIST, struct user* USER)
         (USER->next)->prev = USER->prev;
     }
     LIST->online--;
+    LIST->online_auth -= USER->auth;
     pthread_mutex_unlock(&LIST->mutex);
 
-#ifdef __WIN32__
     closesocket(USER->fd);
-#else
-    close(USER->fd);
-#endif
     free(USER);
 }
 
@@ -798,6 +840,7 @@ void msg_parse_client(char* msg, int fd)
             server.ant = n;
             snprintf(buff, sizeof(buff), "Z%d\n", server.ant);
             msg_send(buff, strlen(buff), fd);
+            server.rds.state = RDS_BUFF_STATE_EMPTY;
         }
         break;
 
@@ -823,7 +866,7 @@ void msg_parse_client(char* msg, int fd)
 
     case 'Q':
         n = atoi(msg+1);
-        if(n >= 0 && n <= 100)
+        if(n >= -1 && n <= 100)
         {
             server.squelch = n;
             snprintf(buff, sizeof(buff), "Q%d\n", server.squelch);
@@ -843,45 +886,69 @@ void msg_parse_client(char* msg, int fd)
     }
 }
 
-void msg_parse_serial(char* msg)
+int msg_parse_serial(char* msg)
 {
     switch(msg[0])
     {
     case 'X':
         tuner_defaults();
-        break;
+        return 1;
 
     case 'T':
         server.freq = atoi(msg+1);
-        break;
+        server.rds.state = RDS_BUFF_STATE_EMPTY;
+        return 1;
 
     case 'V':
         server.daa = atoi(msg+1);
-        break;
+        return 1;
 
     case 'C':
         server.rotator = atoi(msg+1);
-        break;
+        return 1;
+
+    case 'P':
+        snprintf(server.rds.pi, RDS_BUFF_PI_LEN, "%s", msg+1);
+        server.rds.state = ((server.rds.state==RDS_BUFF_STATE_RDS)?RDS_BUFF_STATE_RDSPI:RDS_BUFF_STATE_PI);
+        return 0;
+
+    case 'R':
+        snprintf(server.rds.rds, RDS_BUFF_RDS_LEN, "%s", msg+1);
+        server.rds.state = ((server.rds.state==RDS_BUFF_STATE_PI)?RDS_BUFF_STATE_PIRDS:RDS_BUFF_STATE_RDS);
+        return 0;
+
+    case 'S':
+        return (server.rds.state == RDS_BUFF_STATE_EMPTY);
     }
+    return -1;
 }
 
 void msg_send(char* msg, int len, int ignore_fd)
 {
+    int sent, n;
+    struct user *u;
+
     pthread_mutex_lock(&server.mutex);
-    struct user *u = server.head;
-    while(u)
+    for(u = server.head; u; u=u->next)
     {
-        if(u->fd != ignore_fd)
+        if(u->fd == ignore_fd)
         {
-            if(server.guest || u->auth)
+            continue;
+        }
+        if(server.guest || u->auth)
+        {
+            sent = 0;
+            do
             {
-                if(send(u->fd, msg, len, MSG_NOSIGNAL) < 0)
+                n = send(u->fd, msg+sent, len-sent, MSG_NOSIGNAL);
+                if(n < 0)
                 {
                     shutdown(u->fd, 2);
                 }
+                sent += n;
             }
+            while(sent<len);
         }
-        u=u->next;
     }
     pthread_mutex_unlock(&server.mutex);
 }
@@ -922,13 +989,15 @@ int auth_hash(char* salt, char* password, char* hash)
 void tuner_defaults()
 {
     server.mode = 0;
-    server.volume = 2047;
+    server.volume = 100;
     server.freq = 87500;
     server.deemphasis = 0;
     server.agc = 2;
     server.filter = -1;
+    server.ant = 0;
     server.gain = 0;
     server.daa = 0;
     server.squelch = 0;
     server.rotator = 0;
+    server.rds.state = RDS_BUFF_STATE_EMPTY;
 }
