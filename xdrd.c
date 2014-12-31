@@ -109,7 +109,7 @@ typedef struct server
 
     rds_buffer_t rds;
 
-    struct user* head;
+    user_t* head;
 } server_t;
 
 typedef struct thread
@@ -128,7 +128,7 @@ void* server_conn(void*);
 void serial_init(char*);
 void serial_loop();
 void serial_write(char*, int);
-struct user* user_add(server_t*, int, int);
+user_t* user_add(server_t*, int, int);
 void user_remove(server_t*, user_t*);
 void msg_parse_client(char*, int);
 int msg_parse_serial(char*);
@@ -136,6 +136,7 @@ void msg_send(char*, int, int);
 char* auth_salt();
 int auth_hash(char*, char*, char*);
 void tuner_defaults();
+void tuner_reset();
 
 int main(int argc, char* argv[])
 {
@@ -338,7 +339,7 @@ void server_init(int port)
     pthread_mutex_init(&server.mutex, NULL);
     pthread_mutex_init(&server.mutex_s, NULL);
 
-    tuner_defaults();
+    tuner_reset();
 
     if(pthread_create(&thread, NULL, server_thread, (void*)(long)sockfd))
     {
@@ -392,7 +393,7 @@ void* server_conn(void* t_data)
     int connfd = ((thread_t*)t_data)->fd;
     char* salt = ((thread_t*)t_data)->salt;
 
-    struct user *u;
+    user_t *u;
     fd_set input;
     char buffer[100], c;
     int pos = 0, auth = 0;
@@ -436,7 +437,7 @@ void* server_conn(void* t_data)
     fcntl(connfd, F_SETFL, O_NONBLOCK);
 #endif
 
-    snprintf(buffer, sizeof(buffer), "OK\nM%d\nY%d\nT%d\nD%d\nA%d\nF%d\nZ%d\nG%02d\nV%d\nQ%d\nC%d\n",
+    snprintf(buffer, sizeof(buffer), "M%d\nY%d\nT%d\nD%d\nA%d\nF%d\nZ%d\nG%02d\nV%d\nQ%d\nC%d\n",
              server.mode, server.volume, server.freq, server.deemphasis, server.agc, server.filter, server.ant, server.gain, server.daa, server.squelch, server.rotator);
     send(connfd, buffer, strlen(buffer), MSG_NOSIGNAL);
 
@@ -496,28 +497,7 @@ void* server_conn(void* t_data)
             sprintf(buffer, "X\n");
             msg_send(buffer, strlen(buffer), -1);
         }
-        pthread_mutex_lock(&server.mutex_s);
-#ifdef __WIN32__
-        // restart Arduino using RTS & DTR lines
-        EscapeCommFunction(server.serialfd, CLRDTR);
-        EscapeCommFunction(server.serialfd, CLRRTS);
-        Sleep(10);
-        EscapeCommFunction(server.serialfd, SETDTR);
-        EscapeCommFunction(server.serialfd, SETRTS);
-#else
-        int ctl;
-        // restart Arduino using RTS & DTR lines
-        if(ioctl(server.serialfd, TIOCMGET, &ctl) != -1)
-        {
-            ctl &= ~(TIOCM_DTR | TIOCM_RTS);
-            ioctl(server.serialfd, TIOCMSET, &ctl);
-            usleep(10000);
-            ctl |=  (TIOCM_DTR | TIOCM_RTS);
-            ioctl(server.serialfd, TIOCMSET, &ctl);
-        }
-#endif
-        tuner_defaults();
-        pthread_mutex_unlock(&server.mutex_s);
+        tuner_reset();
     }
     return NULL;
 }
@@ -669,25 +649,25 @@ void serial_loop()
         {
             switch(server.rds.state)
             {
-                case RDS_BUFF_STATE_PI:
-                    snprintf(buffered, sizeof(buffered), "P%s\n%s\n", server.rds.pi, buff);
-                    msg_send(buffered, strlen(buffered), -1);
-                    break;
+            case RDS_BUFF_STATE_PI:
+                snprintf(buffered, sizeof(buffered), "P%s\n%s\n", server.rds.pi, buff);
+                msg_send(buffered, strlen(buffered), -1);
+                break;
 
-                case RDS_BUFF_STATE_RDS:
-                    snprintf(buffered, sizeof(buffered), "R%s\n%s\n", server.rds.rds, buff);
-                    msg_send(buffered, strlen(buffered), -1);
-                    break;
+            case RDS_BUFF_STATE_RDS:
+                snprintf(buffered, sizeof(buffered), "R%s\n%s\n", server.rds.rds, buff);
+                msg_send(buffered, strlen(buffered), -1);
+                break;
 
-                case RDS_BUFF_STATE_PIRDS:
-                    snprintf(buffered, sizeof(buffered), "P%s\nR%s\n%s\n", server.rds.pi, server.rds.rds, buff);
-                    msg_send(buffered, strlen(buffered), -1);
-                    break;
+            case RDS_BUFF_STATE_PIRDS:
+                snprintf(buffered, sizeof(buffered), "P%s\nR%s\n%s\n", server.rds.pi, server.rds.rds, buff);
+                msg_send(buffered, strlen(buffered), -1);
+                break;
 
-                case RDS_BUFF_STATE_RDSPI:
-                    snprintf(buffered, sizeof(buffered), "R%s\nP%s\n%s\n", server.rds.rds, server.rds.pi, buff);
-                    msg_send(buffered, strlen(buffered), -1);
-                    break;
+            case RDS_BUFF_STATE_RDSPI:
+                snprintf(buffered, sizeof(buffered), "R%s\nP%s\n%s\n", server.rds.rds, server.rds.pi, buff);
+                msg_send(buffered, strlen(buffered), -1);
+                break;
             }
             server.rds.state = RDS_BUFF_STATE_EMPTY;
         }
@@ -732,9 +712,9 @@ void serial_write(char* msg, int len)
     pthread_mutex_unlock(&server.mutex_s);
 }
 
-struct user* user_add(server_t* LIST, int fd, int auth)
+user_t* user_add(server_t* LIST, int fd, int auth)
 {
-    struct user* new = malloc(sizeof(struct user));
+    user_t* new = malloc(sizeof(user_t));
     new->fd = fd;
     new->auth = auth;
     new->prev = NULL;
@@ -753,7 +733,7 @@ struct user* user_add(server_t* LIST, int fd, int auth)
     return new;
 }
 
-void user_remove(server_t* LIST, struct user* USER)
+void user_remove(server_t* LIST, user_t* USER)
 {
     pthread_mutex_lock(&LIST->mutex);
     if(USER->prev)
@@ -926,7 +906,7 @@ int msg_parse_serial(char* msg)
 void msg_send(char* msg, int len, int ignore_fd)
 {
     int sent, n;
-    struct user *u;
+    user_t *u;
 
     pthread_mutex_lock(&server.mutex);
     for(u = server.head; u; u=u->next)
@@ -944,6 +924,7 @@ void msg_send(char* msg, int len, int ignore_fd)
                 if(n < 0)
                 {
                     shutdown(u->fd, 2);
+                    break;
                 }
                 sent += n;
             }
@@ -1000,4 +981,30 @@ void tuner_defaults()
     server.squelch = 0;
     server.rotator = 0;
     server.rds.state = RDS_BUFF_STATE_EMPTY;
+}
+
+void tuner_reset()
+{
+    pthread_mutex_lock(&server.mutex_s);
+#ifdef __WIN32__
+    // restart Arduino using RTS & DTR lines
+    EscapeCommFunction(server.serialfd, CLRDTR);
+    EscapeCommFunction(server.serialfd, CLRRTS);
+    Sleep(10);
+    EscapeCommFunction(server.serialfd, SETDTR);
+    EscapeCommFunction(server.serialfd, SETRTS);
+#else
+    int ctl;
+    // restart Arduino using RTS & DTR lines
+    if(ioctl(server.serialfd, TIOCMGET, &ctl) != -1)
+    {
+        ctl &= ~(TIOCM_DTR | TIOCM_RTS);
+        ioctl(server.serialfd, TIOCMSET, &ctl);
+        usleep(10000);
+        ctl |=  (TIOCM_DTR | TIOCM_RTS);
+        ioctl(server.serialfd, TIOCMSET, &ctl);
+    }
+#endif
+    tuner_defaults();
+    pthread_mutex_unlock(&server.mutex_s);
 }
