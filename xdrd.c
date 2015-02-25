@@ -34,6 +34,8 @@
 #include <ws2tcpip.h>
 #define MSG_NOSIGNAL 0
 #define strcasecmp _stricmp
+#define LOG_ERR  0
+#define LOG_INFO 1
 #define DEFAULT_SERIAL "COM3"
 #else
 #include <termios.h>
@@ -277,7 +279,11 @@ int main(int argc, char* argv[])
 void show_usage(char* arg)
 {
     printf("xdrd %s\n", VERSION);
+#ifndef __WIN32__
     printf("usage: %s [ -s serial ] [ -t port ] [ -u users ] [ -p password ] [ -hgxb ]\n", arg);
+#else
+    printf("usage: %s [ -s serial ] [ -t port ] [ -u users ] [ -p password ] [ -hgx ]\n", arg);
+#endif
     printf("options:\n");
     printf("  -s  serial port (default %s)\n", DEFAULT_SERIAL);
     printf("  -t  tcp/ip port (default %d)\n", DEFAULT_PORT);
