@@ -1,5 +1,5 @@
 /*
- *  xdrd 0.1.2
+ *  xdrd 0.2
  *  Copyright (C) 2013-2014  Konrad Kosmatka
  *  http://fmdx.pl/
 
@@ -12,13 +12,12 @@
  *  but WITHOUT ANY WARRANTY; without even the implied warranty of
  *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  *  GNU General Public License for more details.
-
- *  Compile with:
- *  gcc -Wall -O2 xdrd.c sha1.c -o xdrd -lpthread
  */
 
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdarg.h>
+#include <stdint.h>
 #include <fcntl.h>
 #include <getopt.h>
 #include <unistd.h>
@@ -50,7 +49,7 @@
 #define DEFAULT_PORT   7373
 #define DEFAULT_USERS  10
 #define SERIAL_BUFFER  8192
-#define VERSION        "0.1.2"
+#define VERSION        "0.2"
 
 #define RDS_BUFF_RDS_LEN sizeof("xxxxyyyyzzzz00")
 #define RDS_BUFF_PI_LEN  sizeof("xxxx?")
@@ -116,12 +115,14 @@ typedef struct thread
 {
     int fd;
     char* salt;
+    char* ip;
+    uint16_t port;
 } thread_t;
 
 server_t server;
 
 void show_usage(char*);
-void error(char*);
+void server_log(int prio, char* msg, ...);
 void server_init(int);
 void* server_thread(void*);
 void* server_conn(void*);
@@ -156,12 +157,13 @@ int main(int argc, char* argv[])
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2,2), &wsaData))
     {
-        error("main: WSAStartup");
+        server_log(LOG_ERR, "main: WSAStartup");
+        exit(EXIT_FAILURE);
     }
 #else
     if(getuid() == 0)
     {
-        fprintf(stderr, "running the server as the root user is a BAD idea, giving up!\n");
+        fprintf(stderr, "error: running the server as the root user is a BAD idea, giving up!\n");
         exit(EXIT_FAILURE);
     }
 #endif
@@ -235,7 +237,8 @@ int main(int argc, char* argv[])
         switch(fork())
         {
         case -1:
-            error("fork");
+            server_log(LOG_ERR, "fork");
+            exit(EXIT_FAILURE);
 
         case 0:
             close(STDIN_FILENO);
@@ -250,20 +253,18 @@ int main(int argc, char* argv[])
 
         if(setsid() < 0)
         {
-            error("setsid");
+            server_log(LOG_ERR, "setsid");
+            exit(EXIT_FAILURE);
         }
 
         if(chdir("/") < 0)
         {
-            error("chdir");
+            server_log(LOG_ERR, "chdir");
+            exit(EXIT_FAILURE);
         }
     }
-    else
 #endif
-    {
-        printf("xdrd %s is starting using %s and TCP port: %d...\n", VERSION, serial, port);
-    }
-
+    server_log(LOG_INFO, "xdrd %s is starting using %s and TCP port: %d", VERSION, serial, port);
     server_init(port);
     serial_init(serial);
     serial_loop();
@@ -290,19 +291,32 @@ void show_usage(char* arg)
 #endif
 }
 
-void error(char* msg)
+void server_log(int prio, char* msg, ...)
 {
+    va_list myargs;
+    va_start(myargs, msg);
 #ifndef __WIN32__
     if(server.background)
     {
-        syslog(LOG_ERR, "error: %s", msg);
+        vsyslog(prio, msg, myargs);
     }
     else
 #endif
     {
-        fprintf(stderr, "error: %s\n", msg);
+        switch(prio)
+        {
+        case LOG_ERR:
+            fprintf(stderr, "error: ");
+            vfprintf(stderr, msg, myargs);
+            fprintf(stderr, "\n");
+            break;
+        default:
+            vfprintf(stdout, msg, myargs);
+            fprintf(stdout, "\n");
+            break;
+        }
     }
-    exit(EXIT_FAILURE);
+    va_end(myargs);
 }
 
 void server_init(int port)
@@ -313,14 +327,16 @@ void server_init(int port)
 
     if((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
     {
-        error("server_init: socket");
+        server_log(LOG_ERR, "server_init: socket");
+        exit(EXIT_FAILURE);
     }
 
 #ifndef __WIN32__
     int value = 1;
     if(setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, (const char*)&value, sizeof(value)) < 0)
     {
-        error("server_init: SO_REUSEADDR");
+        server_log(LOG_ERR, "server_init: SO_REUSEADDR");
+        exit(EXIT_FAILURE);
     }
 #endif
 
@@ -331,7 +347,8 @@ void server_init(int port)
 
     if(bind(sockfd, (struct sockaddr*)&addr, sizeof(addr)) < 0)
     {
-        error("server_init: bind");
+        server_log(LOG_ERR, "server_init: bind");
+        exit(EXIT_FAILURE);
     }
 
     listen(sockfd, 4);
@@ -343,7 +360,8 @@ void server_init(int port)
 
     if(pthread_create(&thread, NULL, server_thread, (void*)(long)sockfd))
     {
-        error("server_init: pthread_create");
+        server_log(LOG_ERR, "server_init: pthread_create");
+        exit(EXIT_FAILURE);
     }
 }
 
@@ -353,20 +371,24 @@ void* server_thread(void* sockfd)
     pthread_attr_t attr;
     int connfd;
     thread_t *t_data;
+    struct sockaddr_in dest;
+    socklen_t dest_size = sizeof(struct sockaddr_in);
 
     if(pthread_attr_init(&attr))
     {
-        error("server_thread: pthread_attr_init");
+        server_log(LOG_ERR, "server_thread: pthread_attr_init");
+        exit(EXIT_FAILURE);
     }
 
     if(pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED))
     {
-        error("server_thread: pthread_attr_setdetachstate");
+        server_log(LOG_ERR, "server_thread: pthread_attr_setdetachstate");
+        exit(EXIT_FAILURE);
     }
 
     srand((unsigned)time(NULL));
 
-    while((connfd = accept((int)(long)sockfd, (struct sockaddr*)NULL, NULL)) >= 0)
+    while((connfd = accept((int)(long)sockfd, (struct sockaddr *)&dest, &dest_size)) >= 0)
     {
         if(server.online >= server.maxusers)
         {
@@ -377,14 +399,18 @@ void* server_thread(void* sockfd)
         t_data = malloc(sizeof(thread_t));
         t_data->fd = connfd;
         t_data->salt = auth_salt();
+        t_data->ip = strdup(inet_ntoa(dest.sin_addr));
+        t_data->port = ntohs(dest.sin_port);
         if(pthread_create(&thread, &attr, server_conn, (void*)t_data))
         {
-            error("server_thread: pthread_create");
+            server_log(LOG_ERR, "server_thread: pthread_create");
+            exit(EXIT_FAILURE);
         }
     }
 
     pthread_attr_destroy(&attr);
-    error("server_thread: accept");
+    server_log(LOG_ERR, "server_thread: accept");
+    exit(EXIT_FAILURE);
     return NULL;
 }
 
@@ -392,6 +418,8 @@ void* server_conn(void* t_data)
 {
     int connfd = ((thread_t*)t_data)->fd;
     char* salt = ((thread_t*)t_data)->salt;
+    char* ip = ((thread_t*)t_data)->ip;
+    uint16_t port = ((thread_t*)t_data)->port;
 
     user_t *u;
     fd_set input;
@@ -418,6 +446,7 @@ void* server_conn(void* t_data)
         Sleep(2000);
 #endif
         closesocket(connfd);
+        free(ip);
         return NULL;
     }
 
@@ -431,11 +460,15 @@ void* server_conn(void* t_data)
     unsigned long on = 1;
     if (ioctlsocket(connfd, FIONBIO, &on) != NO_ERROR)
     {
-        error("server_conn: ioctlsocket");
+        server_log(LOG_ERR, "server_conn: ioctlsocket");
+        free(ip);
+        exit(EXIT_FAILURE);
     }
 #else
     fcntl(connfd, F_SETFL, O_NONBLOCK);
 #endif
+
+    server_log(LOG_INFO, "user connected: %s:%u%s", ip, port, (auth ? "" : " (guest)"));
 
     snprintf(buffer, sizeof(buffer), "M%d\nY%d\nT%d\nD%d\nA%d\nF%d\nZ%d\nG%02d\nV%d\nQ%d\nC%d\n",
              server.mode, server.volume, server.freq, server.deemphasis, server.agc, server.filter, server.ant, server.gain, server.daa, server.squelch, server.rotator);
@@ -499,6 +532,8 @@ void* server_conn(void* t_data)
         }
         tuner_reset();
     }
+    server_log(LOG_INFO, "user disconnected: %s:%u", ip, port);
+    free(ip);
     return NULL;
 }
 
@@ -508,13 +543,15 @@ void serial_init(char* path)
     server.serialfd = CreateFile(path, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
     if(server.serialfd == INVALID_HANDLE_VALUE)
     {
-        error("serial_init: CreateFile");
+        server_log(LOG_ERR, "serial_init: CreateFile");
+        exit(EXIT_FAILURE);
     }
     DCB dcbSerialParams = {0};
     if(!GetCommState(server.serialfd, &dcbSerialParams))
     {
         CloseHandle(server.serialfd);
-        error("serial_init: GetCommState");
+        server_log(LOG_ERR, "serial_init: GetCommState");
+        exit(EXIT_FAILURE);
     }
     dcbSerialParams.BaudRate = CBR_115200;
     dcbSerialParams.ByteSize = 8;
@@ -523,12 +560,14 @@ void serial_init(char* path)
     if(!SetCommState(server.serialfd, &dcbSerialParams))
     {
         CloseHandle(server.serialfd);
-        error("serial_init: SetCommState");
+        server_log(LOG_ERR, "serial_init: SetCommState");
+        exit(EXIT_FAILURE);
     }
 #else
     if((server.serialfd = open(path, O_RDWR | O_NOCTTY | O_NDELAY)) < 0)
     {
-        error("serial_init: open");
+        server_log(LOG_ERR, "serial_init: open");
+        exit(EXIT_FAILURE);
     }
 
     fcntl(server.serialfd, F_SETFL, 0);
@@ -538,12 +577,14 @@ void serial_init(char* path)
     if(tcgetattr(server.serialfd, &options))
     {
         close(server.serialfd);
-        error("serial_init: tcgetattr");
+        server_log(LOG_ERR, "serial_init: tcgetattr");
+        exit(EXIT_FAILURE);
     }
     if(cfsetispeed(&options, B115200) || cfsetospeed(&options, B115200))
     {
         close(server.serialfd);
-        error("serial_init: cfsetspeed");
+        server_log(LOG_ERR, "serial_init: cfsetspeed");
+        exit(EXIT_FAILURE);
     }
     options.c_iflag &= ~(BRKINT | ICRNL | IXON | IMAXBEL);
     options.c_iflag |= IGNBRK;
@@ -555,7 +596,8 @@ void serial_init(char* path)
     if(tcsetattr(server.serialfd, TCSANOW, &options))
     {
         close(server.serialfd);
-        error("serial_init: tcsetattr");
+        server_log(LOG_ERR, "serial_init: tcsetattr");
+        exit(EXIT_FAILURE);
     }
 #endif
 }
@@ -573,7 +615,8 @@ void serial_loop()
     osReader.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
     if (osReader.hEvent == NULL)
     {
-        error("serial_loop: CreateEvent");
+        server_log(LOG_ERR, "serial_loop: CreateEvent");
+        exit(EXIT_FAILURE);
     }
 #else
     fd_set input;
@@ -679,7 +722,8 @@ void serial_loop()
 #else
     close(server.serialfd);
 #endif
-    error("serial_loop");
+    server_log(LOG_ERR, "serial_loop");
+    exit(EXIT_FAILURE);
 }
 
 void serial_write(char* msg, int len)
@@ -692,7 +736,8 @@ void serial_write(char* msg, int len)
     osWrite.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
     if(osWrite.hEvent == NULL)
     {
-        error("server_conn: CreateEvent");
+        server_log(LOG_ERR, "server_conn: CreateEvent");
+        exit(EXIT_FAILURE);
     }
 
     if (!WriteFile(server.serialfd, msg, len, &dwWritten, &osWrite))
