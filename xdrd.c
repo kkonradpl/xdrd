@@ -1,6 +1,6 @@
 /*
- *  xdrd 0.2
- *  Copyright (C) 2013-2014  Konrad Kosmatka
+ *  xdrd 1.0
+ *  Copyright (C) 2013-2016  Konrad Kosmatka
  *  http://fmdx.pl/
 
  *  This program is free software; you can redistribute it and/or
@@ -25,15 +25,15 @@
 #include <pthread.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-#include "sha1.h"
+#include "xdr-protocol.h"
 
 #ifdef __WIN32__
 #define _WIN32_WINNT 0x0501
 #include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#define MSG_NOSIGNAL 0
 #define strcasecmp _stricmp
+#define MSG_NOSIGNAL 0
 #define LOG_ERR  0
 #define LOG_INFO 1
 #define DEFAULT_SERIAL "COM3"
@@ -44,29 +44,15 @@
 #include <sys/socket.h>
 #include <sys/select.h>
 #include <sys/ioctl.h>
-#define closesocket(x) close(x)
 #define DEFAULT_SERIAL "/dev/ttyUSB0"
 #endif
 
-#define DEFAULT_PORT   7373
-#define DEFAULT_USERS  10
-#define SERIAL_BUFFER  8192
-#define VERSION        "0.2"
+#include <openssl/rand.h>
+#include <openssl/sha.h>
 
-#define RDS_BUFF_RDS_LEN sizeof("xxxxyyyyzzzz00")
-#define RDS_BUFF_PI_LEN  sizeof("xxxx?")
-#define RDS_BUFF_STATE_EMPTY 0
-#define RDS_BUFF_STATE_PI    1
-#define RDS_BUFF_STATE_RDS   2
-#define RDS_BUFF_STATE_PIRDS 3
-#define RDS_BUFF_STATE_RDSPI 4
-
-typedef struct rds_buffer
-{
-    int state;
-    char pi[RDS_BUFF_PI_LEN];
-    char rds[RDS_BUFF_RDS_LEN];
-} rds_buffer_t;
+#define VERSION       "0.2.1"
+#define DEFAULT_USERS 10
+#define SERIAL_BUFFER 8192
 
 typedef struct user
 {
@@ -75,7 +61,6 @@ typedef struct user
     struct user* next;
     struct user* prev;
 } user_t;
-
 
 typedef struct server
 {
@@ -108,8 +93,6 @@ typedef struct server
     int squelch;
     int rotator;
 
-    rds_buffer_t rds;
-
     user_t* head;
 } server_t;
 
@@ -133,18 +116,18 @@ void serial_loop();
 void serial_write(char*, int);
 user_t* user_add(server_t*, int, int);
 void user_remove(server_t*, user_t*);
-void msg_parse_client(char*, int);
-int msg_parse_serial(char*);
+void msg_parse_serial(char*);
 void msg_send(char*, int, int);
 char* auth_salt();
 int auth_hash(char*, char*, char*);
 void tuner_defaults();
 void tuner_reset();
+void socket_close(int);
 
 int main(int argc, char* argv[])
 {
-    char serial[50] = DEFAULT_SERIAL;
-    int port = DEFAULT_PORT;
+    char serial[250] = DEFAULT_SERIAL;
+    int port = XDR_TCP_DEFAULT_PORT;
     int c;
 
     server.background = 0;
@@ -165,7 +148,7 @@ int main(int argc, char* argv[])
 #else
     if(getuid() == 0)
     {
-        fprintf(stderr, "error: running the server as the root user is a BAD idea, giving up!\n");
+        fprintf(stderr, "error: running the server as root is a bad idea, giving up!\n");
         exit(EXIT_FAILURE);
     }
 #endif
@@ -200,7 +183,7 @@ int main(int argc, char* argv[])
 #ifdef __WIN32__
             snprintf(serial, sizeof(serial), "\\\\.\\%s", optarg);
 #else
-            snprintf(serial, sizeof(serial), "/dev/%s", optarg);
+            snprintf(serial, sizeof(serial), "%s", optarg);
 #endif
             break;
 
@@ -266,7 +249,7 @@ int main(int argc, char* argv[])
         }
     }
 #endif
-    server_log(LOG_INFO, "xdrd %s is starting using %s and TCP port: %d", VERSION, serial, port);
+    server_log(LOG_INFO, "xdrd " VERSION " is starting using %s and TCP port: %d", serial, port);
     server_init(port);
     serial_init(serial);
     serial_loop();
@@ -278,7 +261,7 @@ int main(int argc, char* argv[])
 
 void show_usage(char* arg)
 {
-    printf("xdrd %s\n", VERSION);
+    printf("xdrd " VERSION "\n");
 #ifndef __WIN32__
     printf("usage: %s [ -s serial ] [ -t port ] [ -u users ] [ -p password ] [ -hgxb ]\n", arg);
 #else
@@ -286,7 +269,7 @@ void show_usage(char* arg)
 #endif
     printf("options:\n");
     printf("  -s  serial port (default %s)\n", DEFAULT_SERIAL);
-    printf("  -t  tcp/ip port (default %d)\n", DEFAULT_PORT);
+    printf("  -t  tcp/ip port (default %d)\n", XDR_TCP_DEFAULT_PORT);
     printf("  -u  max users   (default %d)\n", DEFAULT_USERS);
     printf("  -p  specify password (required)\n");
     printf("  -h  show this help list\n");
@@ -362,7 +345,7 @@ void server_init(int port)
     pthread_mutex_init(&server.mutex, NULL);
     pthread_mutex_init(&server.mutex_s, NULL);
 
-    tuner_reset();
+    tuner_defaults();
 
     if(pthread_create(&thread, NULL, server_thread, (void*)(long)sockfd))
     {
@@ -379,6 +362,7 @@ void* server_thread(void* sockfd)
     thread_t *t_data;
     struct sockaddr_in dest;
     socklen_t dest_size = sizeof(struct sockaddr_in);
+    char *salt;
 
     if(pthread_attr_init(&attr))
     {
@@ -392,19 +376,23 @@ void* server_thread(void* sockfd)
         exit(EXIT_FAILURE);
     }
 
-    srand((unsigned)time(NULL));
-
     while((connfd = accept((int)(long)sockfd, (struct sockaddr *)&dest, &dest_size)) >= 0)
     {
         if(server.online >= server.maxusers)
         {
-            closesocket(connfd);
+            socket_close(connfd);
+            continue;
+        }
+
+        if(!(salt = auth_salt()))
+        {
+            socket_close(connfd);
             continue;
         }
 
         t_data = malloc(sizeof(thread_t));
         t_data->fd = connfd;
-        t_data->salt = auth_salt();
+        t_data->salt = salt;
         t_data->ip = strdup(inet_ntoa(dest.sin_addr));
         t_data->port = ntohs(dest.sin_port);
         if(pthread_create(&thread, &attr, server_conn, (void*)t_data))
@@ -429,7 +417,7 @@ void* server_conn(void* t_data)
 
     user_t *u;
     fd_set input;
-    char buffer[100], c;
+    char buffer[100];
     int pos = 0, auth = 0;
 
     free(t_data);
@@ -448,10 +436,11 @@ void* server_conn(void* t_data)
     {
         snprintf(buffer, sizeof(buffer), "a0\n");
         send(connfd, buffer, strlen(buffer), MSG_NOSIGNAL);
+
 #ifdef __WIN32__
         Sleep(2000);
 #endif
-        closesocket(connfd);
+        socket_close(connfd);
         free(ip);
         return NULL;
     }
@@ -476,70 +465,80 @@ void* server_conn(void* t_data)
 
     server_log(LOG_INFO, "user connected: %s:%u%s", ip, port, (auth ? "" : " (guest)"));
 
-    snprintf(buffer, sizeof(buffer), "M%d\nY%d\nT%d\nD%d\nA%d\nF%d\nZ%d\nG%02d\nV%d\nQ%d\nC%d\n",
-             server.mode, server.volume, server.freq, server.deemphasis, server.agc, server.filter, server.ant, server.gain, server.daa, server.squelch, server.rotator);
-    send(connfd, buffer, strlen(buffer), MSG_NOSIGNAL);
+    if(server.online_auth)
+    {
+        snprintf(buffer, sizeof(buffer),
+                 "M%d\nY%d\nT%d\nD%d\nA%d\nF%d\nZ%d\nG%02d\nV%d\nQ%d\nC%d\n",
+                 server.mode,
+                 server.volume,
+                 server.freq,
+                 server.deemphasis,
+                 server.agc,
+                 server.filter,
+                 server.ant,
+                 server.gain,
+                 server.daa,
+                 server.squelch,
+                 server.rotator);
+        send(connfd, buffer, strlen(buffer), MSG_NOSIGNAL);
+    }
 
     u = user_add(&server, connfd, auth);
 
-    snprintf(buffer, sizeof(buffer), "o%d\n", server.online);
+    snprintf(buffer, sizeof(buffer), "o%d,%d\n",
+             server.online_auth,
+             server.online - server.online_auth);
     msg_send(buffer, strlen(buffer), -1);
 
     FD_ZERO(&input);
     FD_SET(u->fd, &input);
     while(select(u->fd+1, &input, NULL, NULL, NULL) > 0)
     {
-        if(recv(u->fd, &c, 1, MSG_NOSIGNAL) <= 0)
-        {
+        if(recv(u->fd, &buffer[pos], 1, MSG_NOSIGNAL) <= 0)
             break;
-        }
 
-        if(c != '\n')
+        /* If this command is too long to
+         * fit into a buffer, clip it */
+        if(buffer[pos] != '\n')
         {
-            if(pos == sizeof(buffer)-1)
-            {
-                // disconnect user when the buffer is full
-                break;
-            }
-            buffer[pos++] = c;
+            if(pos != sizeof(buffer)-1)
+                pos++;
             continue;
         }
 
-        if(buffer[0] == 'X')
-        {
+        if(buffer[0] == XDR_P_SHUTDOWN)
             break;
-        }
 
         if(u->auth)
-        {
-            buffer[pos] = '\n';
             serial_write(buffer, pos+1);
-            buffer[pos] = 0;
-
-            msg_parse_client(buffer, u->fd);
-        }
 
         pos = 0;
     }
 
     user_remove(&server, u);
+    server_log(LOG_INFO, "user disconnected: %s:%u", ip, port);
+    free(ip);
+
     if(server.online)
     {
-        snprintf(buffer, sizeof(buffer), "o%d\n", server.online);
+        snprintf(buffer, sizeof(buffer), "o%d,%d\n",
+                 server.online_auth,
+                 server.online - server.online_auth);
         msg_send(buffer, strlen(buffer), -1);
     }
+
     if(!server.online_auth && server.poweroff)
     {
         if(server.online)
         {
-            // tell unauthenticated users that XDR is powered off
+            /* tell unauthenticated users that XDR has been powered off */
             sprintf(buffer, "X\n");
             msg_send(buffer, strlen(buffer), -1);
         }
+        server_log(LOG_INFO, "tuner shutdown");
         tuner_reset();
     }
-    server_log(LOG_INFO, "user disconnected: %s:%u", ip, port);
-    free(ip);
+
     return NULL;
 }
 
@@ -606,11 +605,12 @@ void serial_init(char* path)
         exit(EXIT_FAILURE);
     }
 #endif
+    tuner_reset();
 }
 
 void serial_loop()
 {
-    char c, buff[SERIAL_BUFFER], buffered[100];
+    char buff[SERIAL_BUFFER];
     int pos = 0;
 
 #ifdef __WIN32__
@@ -633,7 +633,7 @@ void serial_loop()
     {
         if (!fWaitingOnRead)
         {
-            if (!ReadFile(server.serialfd, &c, 1, &len_in, &osReader))
+            if (!ReadFile(server.serialfd, &buff[pos], 1, &len_in, &osReader))
             {
                 if (GetLastError() != ERROR_IO_PENDING)
                 {
@@ -677,49 +677,23 @@ void serial_loop()
     FD_SET(server.serialfd, &input);
     while(select(server.serialfd+1, &input, NULL, NULL, NULL) > 0)
     {
-        if(read(server.serialfd, &c, 1) <= 0)
-        {
+        if(read(server.serialfd, &buff[pos], 1) <= 0)
             break;
-        }
 #endif
-        if(c != '\n' && pos != SERIAL_BUFFER-1)
+        /* If this command is too long to
+         * fit into a buffer, clip it */
+        if(buff[pos] != '\n')
         {
-            buff[pos++] = c;
+            if(pos != SERIAL_BUFFER-1)
+                pos++;
             continue;
         }
 
         buff[pos] = 0;
-        if(msg_parse_serial(buff))
-        {
-            buff[pos] = '\n';
-            msg_send(buff, pos+1, -1);
-        }
-        else if(buff[0] == 'S') // print RDS buffers
-        {
-            switch(server.rds.state)
-            {
-            case RDS_BUFF_STATE_PI:
-                snprintf(buffered, sizeof(buffered), "P%s\n%s\n", server.rds.pi, buff);
-                msg_send(buffered, strlen(buffered), -1);
-                break;
+        msg_parse_serial(buff);
+        buff[pos] = '\n';
 
-            case RDS_BUFF_STATE_RDS:
-                snprintf(buffered, sizeof(buffered), "R%s\n%s\n", server.rds.rds, buff);
-                msg_send(buffered, strlen(buffered), -1);
-                break;
-
-            case RDS_BUFF_STATE_PIRDS:
-                snprintf(buffered, sizeof(buffered), "P%s\nR%s\n%s\n", server.rds.pi, server.rds.rds, buff);
-                msg_send(buffered, strlen(buffered), -1);
-                break;
-
-            case RDS_BUFF_STATE_RDSPI:
-                snprintf(buffered, sizeof(buffered), "R%s\nP%s\n%s\n", server.rds.rds, server.rds.pi, buff);
-                msg_send(buffered, strlen(buffered), -1);
-                break;
-            }
-            server.rds.state = RDS_BUFF_STATE_EMPTY;
-        }
+        msg_send(buff, pos+1, -1);
 
         pos = 0;
     }
@@ -765,23 +739,23 @@ void serial_write(char* msg, int len)
 
 user_t* user_add(server_t* LIST, int fd, int auth)
 {
-    user_t* new = malloc(sizeof(user_t));
-    new->fd = fd;
-    new->auth = auth;
-    new->prev = NULL;
+    user_t* u = malloc(sizeof(user_t));
+    u->fd = fd;
+    u->auth = auth;
+    u->prev = NULL;
 
     pthread_mutex_lock(&LIST->mutex);
-    new->next = LIST->head;
+    u->next = LIST->head;
     if(LIST->head)
     {
-        (LIST->head)->prev = new;
+        (LIST->head)->prev = u;
     }
-    LIST->head = new;
+    LIST->head = u;
     LIST->online++;
     LIST->online_auth += auth;
     pthread_mutex_unlock(&LIST->mutex);
 
-    return new;
+    return u;
 }
 
 void user_remove(server_t* LIST, user_t* USER)
@@ -803,155 +777,58 @@ void user_remove(server_t* LIST, user_t* USER)
     LIST->online_auth -= USER->auth;
     pthread_mutex_unlock(&LIST->mutex);
 
-    closesocket(USER->fd);
+    socket_close(USER->fd);
     free(USER);
 }
 
-void msg_parse_client(char* msg, int fd)
-{
-    char buff[10];
-    int n;
-
-    switch(msg[0])
-    {
-    case 'M':
-        n = atoi(msg+1);
-        if(n == 0 || n == 1)
-        {
-            server.mode = n;
-            snprintf(buff, sizeof(buff), "M%d\n", server.mode);
-            msg_send(buff, strlen(buff), fd);
-        }
-        break;
-
-    case 'Y':
-        n = atoi(msg+1);
-        if(n >= 0 && n <= 100)
-        {
-            server.volume = n;
-            snprintf(buff, sizeof(buff), "Y%d\n", server.volume);
-            msg_send(buff, strlen(buff), fd);
-        }
-        break;
-
-    case 'D':
-        n = atoi(msg+1);
-        if(n >= 0 && n <= 2)
-        {
-            server.deemphasis = n;
-            snprintf(buff, sizeof(buff), "D%d\n", server.deemphasis);
-            msg_send(buff, strlen(buff), fd);
-        }
-        break;
-
-    case 'A':
-        n = atoi(msg+1);
-        if(n >= 0 && n <= 3)
-        {
-            server.agc = n;
-            snprintf(buff, sizeof(buff), "A%d\n", server.agc);
-            msg_send(buff, strlen(buff), fd);
-        }
-        break;
-
-    case 'F':
-        n = atoi(msg+1);
-        if(n >= -1 && n <= 31)
-        {
-            server.filter = n;
-            snprintf(buff, sizeof(buff), "F%d\n", server.filter);
-            msg_send(buff, strlen(buff), fd);
-        }
-        break;
-
-    case 'Z':
-        n = atoi(msg+1);
-        if(n >= 0 && n <= 3)
-        {
-            server.ant = n;
-            snprintf(buff, sizeof(buff), "Z%d\n", server.ant);
-            msg_send(buff, strlen(buff), fd);
-            server.rds.state = RDS_BUFF_STATE_EMPTY;
-        }
-        break;
-
-    case 'G':
-        n = atoi(msg+1);
-        if(n == 0 || n == 1 || n == 10 || n == 11)
-        {
-            server.gain = n;
-            snprintf(buff, sizeof(buff), "G%02d\n", server.gain);
-            msg_send(buff, strlen(buff), fd);
-        }
-        break;
-
-    case 'V':
-        n = atoi(msg+1);
-        if(n >= 0 && n < 128)
-        {
-            server.daa = n;
-            snprintf(buff, sizeof(buff), "V%d\n", server.daa);
-            msg_send(buff, strlen(buff), fd);
-        }
-        break;
-
-    case 'Q':
-        n = atoi(msg+1);
-        if(n >= -1 && n <= 100)
-        {
-            server.squelch = n;
-            snprintf(buff, sizeof(buff), "Q%d\n", server.squelch);
-            msg_send(buff, strlen(buff), fd);
-        }
-        break;
-
-    case 'C':
-        n = atoi(msg+1);
-        if(n >= 0 && n <= 2)
-        {
-            server.rotator = n;
-            snprintf(buff, sizeof(buff), "C%d\n", server.rotator);
-            msg_send(buff, strlen(buff), fd);
-        }
-        break;
-    }
-}
-
-int msg_parse_serial(char* msg)
+void msg_parse_serial(char* msg)
 {
     switch(msg[0])
     {
-    case 'X':
+    case XDR_P_SHUTDOWN:
         tuner_defaults();
-        return 1;
+        return;
 
-    case 'T':
+    case XDR_P_MODE:
+        server.mode = atoi(msg+1);
+        return;
+
+    case XDR_P_TUNE:
         server.freq = atoi(msg+1);
-        server.rds.state = RDS_BUFF_STATE_EMPTY;
-        return 1;
+        return;
 
-    case 'V':
+    case XDR_P_DAA:
         server.daa = atoi(msg+1);
-        return 1;
+        return;
 
-    case 'C':
+    case XDR_P_DEEMPHASIS:
+        server.deemphasis = atoi(msg+1);
+        return;
+
+    case XDR_P_AGC:
+        server.agc = atoi(msg+1);
+        return;
+
+    case XDR_P_GAIN:
+        server.gain = atoi(msg+1);
+        return;
+
+    case XDR_P_SQUELCH:
+        server.squelch = atoi(msg+1);
+        return;
+
+    case XDR_P_VOLUME:
+        server.volume = atoi(msg+1);
+        return;
+
+    case XDR_P_ANTENNA:
+        server.ant = atoi(msg+1);
+        return;
+
+    case XDR_P_ROTATOR:
         server.rotator = atoi(msg+1);
-        return 1;
-
-    case 'P':
-        snprintf(server.rds.pi, RDS_BUFF_PI_LEN, "%s", msg+1);
-        server.rds.state = ((server.rds.state==RDS_BUFF_STATE_RDS)?RDS_BUFF_STATE_RDSPI:RDS_BUFF_STATE_PI);
-        return 0;
-
-    case 'R':
-        snprintf(server.rds.rds, RDS_BUFF_RDS_LEN, "%s", msg+1);
-        server.rds.state = ((server.rds.state==RDS_BUFF_STATE_PI)?RDS_BUFF_STATE_PIRDS:RDS_BUFF_STATE_RDS);
-        return 0;
-
-    case 'S':
-        return (server.rds.state == RDS_BUFF_STATE_EMPTY);
+        return;
     }
-    return -1;
 }
 
 void msg_send(char* msg, int len, int ignore_fd)
@@ -987,58 +864,65 @@ void msg_send(char* msg, int len, int ignore_fd)
 
 char* auth_salt()
 {
-    char chars[] = "QWERTYUIOPASDFGHJKLZXCVBNMqwertyuiopasdfghjklzxcvbnm0123456789";
-    char* salt = (char*)malloc(sizeof(char)*17);
+    static const char chars[] = "QWERTYUIOPASDFGHJKLZXCVBNMqwertyuiopasdfghjklzxcvbnm0123456789_-";
+    const int len = strlen(chars);
+    unsigned char random_data[XDR_TCP_SALT_LENGTH];
+    char* output;
     int i;
-    for(i=0; i<16; i++)
+
+    if(!RAND_pseudo_bytes(random_data, sizeof(random_data)))
     {
-        salt[i] = chars[rand()%strlen(chars)];
+        server_log(LOG_ERR, "RAND_pseudo_bytes failed!");
+        return NULL;
     }
-    salt[i] = 0;
-    return salt;
+
+    output = (char*)malloc(sizeof(char)*(XDR_TCP_SALT_LENGTH+1));
+    for(i=0; i<XDR_TCP_SALT_LENGTH; i++)
+    {
+        output[i] = chars[random_data[i]%len];
+    }
+    output[i] = 0;
+    return output;
 }
 
 int auth_hash(char* salt, char* password, char* hash)
 {
-    unsigned char sha[SHA1_DIGEST_SIZE];
-    char sha_string[SHA1_DIGEST_SIZE*2+1];
+    SHA_CTX ctx;
+    unsigned char sha[SHA_DIGEST_LENGTH];
+    char sha_string[SHA_DIGEST_LENGTH*2+1];
     int i;
 
-    SHA1_CTX ctx;
     SHA1_Init(&ctx);
     SHA1_Update(&ctx, (unsigned char*)salt, strlen(salt));
     SHA1_Update(&ctx, (unsigned char*)password, strlen(password));
-    SHA1_Final(&ctx, sha);
+    SHA1_Final(sha, &ctx);
 
-    for(i=0; i<SHA1_DIGEST_SIZE; i++)
-    {
+    for(i=0; i<SHA_DIGEST_LENGTH; i++)
         sprintf(sha_string+(i*2), "%02x", sha[i]);
-    }
 
     return (strcasecmp(hash, sha_string) == 0);
 }
 
 void tuner_defaults()
 {
-    server.mode = 0;
-    server.volume = 100;
-    server.freq = 87500;
-    server.deemphasis = 0;
-    server.agc = 2;
-    server.filter = -1;
-    server.ant = 0;
-    server.gain = 0;
-    server.daa = 0;
-    server.squelch = 0;
-    server.rotator = 0;
-    server.rds.state = RDS_BUFF_STATE_EMPTY;
+    server.mode = XDR_P_MODE_DEFAULT;
+    server.volume = XDR_P_VOLUME_DEFAULT;
+    server.freq = XDR_P_TUNE_DEFAULT;
+    server.deemphasis = XDR_P_DEEMPHASIS_DEFAULT;
+    server.agc = XDR_P_AGC_DEFAULT;
+    server.filter = XDR_P_FILTER_DEFAULT;
+    server.ant = XDR_P_ANTENNA_DEFAULT;
+    server.gain = XDR_P_GAIN_DEFAULT;
+    server.daa = XDR_P_DAA_DEFAULT;
+    server.squelch = XDR_P_SQUELCH_DEFAULT;
+    server.rotator = XDR_P_ROTATOR_DEFAULT;
 }
 
 void tuner_reset()
 {
+    /* restart Arduino using RTS & DTR lines */
     pthread_mutex_lock(&server.mutex_s);
 #ifdef __WIN32__
-    // restart Arduino using RTS & DTR lines
     EscapeCommFunction(server.serialfd, CLRDTR);
     EscapeCommFunction(server.serialfd, CLRRTS);
     Sleep(10);
@@ -1046,7 +930,6 @@ void tuner_reset()
     EscapeCommFunction(server.serialfd, SETRTS);
 #else
     int ctl;
-    // restart Arduino using RTS & DTR lines
     if(ioctl(server.serialfd, TIOCMGET, &ctl) != -1)
     {
         ctl &= ~(TIOCM_DTR | TIOCM_RTS);
@@ -1057,5 +940,24 @@ void tuner_reset()
     }
 #endif
     tuner_defaults();
+
+    /* Wait for controller re-initialization,
+       before unlocking the mutex. */
+#ifdef __WIN32__
+    Sleep(XDR_P_ARDUINO_INIT_TIME);
+#else
+    usleep(XDR_P_ARDUINO_INIT_TIME * 1000);
+#endif
+
     pthread_mutex_unlock(&server.mutex_s);
+}
+
+void socket_close(int fd)
+{
+    shutdown(fd, 2);
+#ifdef __WIN32__
+    closesocket(fd);
+#else
+    close(fd);
+#endif
 }

@@ -23,22 +23,18 @@
 				<Compiler>
 					<Add option="-O2" />
 				</Compiler>
-				<Linker>
-					<Add option="-s" />
-				</Linker>
 			</Target>
 		</Build>
 		<Compiler>
 			<Add option="-Wall" />
+			<Add option="-I./include" />
 		</Compiler>
 		<Linker>
 			<Add option="-lws2_32" />
 			<Add library=".\libpthreadGC2.a" />
+			<Add library=".\libeay32.lib" />
 		</Linker>
-		<Unit filename="../sha1.c">
-			<Option compilerVar="CC" />
-		</Unit>
-		<Unit filename="../sha1.h" />
+		<Unit filename="../xdr-protocol.h" />
 		<Unit filename="../xdrd.c">
 			<Option compilerVar="CC" />
 		</Unit>
