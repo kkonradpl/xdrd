@@ -50,7 +50,7 @@
 #include <openssl/rand.h>
 #include <openssl/sha.h>
 
-#define VERSION       "0.2.1"
+#define VERSION       "1.0"
 #define DEFAULT_USERS 10
 #define SERIAL_BUFFER 8192
 
