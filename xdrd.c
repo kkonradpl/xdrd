@@ -14,6 +14,18 @@
  *  GNU General Public License for more details.
  */
 
+#ifdef __WIN32__
+#define _WIN32_WINNT 0x0501
+#include <winsock2.h>
+#include <windows.h>
+#include <ws2tcpip.h>
+#define strcasecmp _stricmp
+#define MSG_NOSIGNAL 0
+#define LOG_ERR  0
+#define LOG_INFO 1
+#define DEFAULT_SERIAL "COM3"
+#endif
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -25,19 +37,11 @@
 #include <pthread.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <openssl/rand.h>
+#include <openssl/sha.h>
 #include "xdr-protocol.h"
 
-#ifdef __WIN32__
-#define _WIN32_WINNT 0x0501
-#include <windows.h>
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#define strcasecmp _stricmp
-#define MSG_NOSIGNAL 0
-#define LOG_ERR  0
-#define LOG_INFO 1
-#define DEFAULT_SERIAL "COM3"
-#else
+#ifndef __WIN32__
 #include <termios.h>
 #include <syslog.h>
 #include <arpa/inet.h>
@@ -46,9 +50,6 @@
 #include <sys/ioctl.h>
 #define DEFAULT_SERIAL "/dev/ttyUSB0"
 #endif
-
-#include <openssl/rand.h>
-#include <openssl/sha.h>
 
 #define VERSION       "1.0"
 #define DEFAULT_USERS 10
@@ -117,7 +118,7 @@ void serial_write(char*, int);
 user_t* user_add(server_t*, int, int);
 void user_remove(server_t*, user_t*);
 void msg_parse_serial(char*);
-void msg_send(char*, int, int);
+void msg_send(char*, int);
 char* auth_salt();
 int auth_hash(char*, char*, char*);
 void tuner_defaults();
@@ -137,6 +138,9 @@ int main(int argc, char* argv[])
     server.online = 0;
     server.online_auth = 0;
     server.head = NULL;
+    tuner_defaults();
+    pthread_mutex_init(&server.mutex, NULL);
+    pthread_mutex_init(&server.mutex_s, NULL);
 
 #ifdef __WIN32__
     WSADATA wsaData;
@@ -153,13 +157,12 @@ int main(int argc, char* argv[])
     }
 #endif
 
-    while ((c = getopt(argc, argv, "hbgxt:s:u:p:")) != -1)
+    while((c = getopt(argc, argv, "hbgxt:s:u:p:")) != -1)
     {
         switch(c)
         {
         case 'h':
             show_usage(argv[0]);
-            exit(EXIT_SUCCESS);
 
 #ifndef __WIN32__
         case 'b':
@@ -192,13 +195,12 @@ int main(int argc, char* argv[])
             break;
 
         case 'p':
-            server.password = strdup(optarg);
+            server.password = optarg;
             break;
 
         case ':':
         case '?':
             show_usage(argv[0]);
-            exit(EXIT_FAILURE);
         }
     }
 
@@ -206,14 +208,12 @@ int main(int argc, char* argv[])
     {
         fprintf(stderr, "error: the tcp port must be in 1024-65535 range\n");
         show_usage(argv[0]);
-        exit(EXIT_FAILURE);
     }
 
     if(!server.password || !strlen(server.password))
     {
         fprintf(stderr, "error: no password specified\n");
         show_usage(argv[0]);
-        exit(EXIT_FAILURE);
     }
 
 #ifndef __WIN32__
@@ -256,7 +256,8 @@ int main(int argc, char* argv[])
 #ifdef __WIN32__
     WSACleanup();
 #endif
-    return -1;
+    server_log(LOG_ERR, "lost connection with tuner");
+    return EXIT_FAILURE;
 }
 
 void show_usage(char* arg)
@@ -278,6 +279,7 @@ void show_usage(char* arg)
 #ifndef __WIN32__
     printf("  -b  run server in the background\n");
 #endif
+    exit(EXIT_SUCCESS);
 }
 
 void server_log(int prio, char* msg, ...)
@@ -342,12 +344,7 @@ void server_init(int port)
 
     listen(sockfd, 4);
 
-    pthread_mutex_init(&server.mutex, NULL);
-    pthread_mutex_init(&server.mutex_s, NULL);
-
-    tuner_defaults();
-
-    if(pthread_create(&thread, NULL, server_thread, (void*)(long)sockfd))
+    if(pthread_create(&thread, NULL, server_thread, (void*)(intptr_t)sockfd))
     {
         server_log(LOG_ERR, "server_init: pthread_create");
         exit(EXIT_FAILURE);
@@ -376,7 +373,7 @@ void* server_thread(void* sockfd)
         exit(EXIT_FAILURE);
     }
 
-    while((connfd = accept((int)(long)sockfd, (struct sockaddr *)&dest, &dest_size)) >= 0)
+    while((connfd = accept((int)(intptr_t)sockfd, (struct sockaddr *)&dest, &dest_size)) >= 0)
     {
         if(server.online >= server.maxusers)
         {
@@ -488,7 +485,7 @@ void* server_conn(void* t_data)
     snprintf(buffer, sizeof(buffer), "o%d,%d\n",
              server.online_auth,
              server.online - server.online_auth);
-    msg_send(buffer, strlen(buffer), -1);
+    msg_send(buffer, strlen(buffer));
 
     FD_ZERO(&input);
     FD_SET(u->fd, &input);
@@ -524,7 +521,7 @@ void* server_conn(void* t_data)
         snprintf(buffer, sizeof(buffer), "o%d,%d\n",
                  server.online_auth,
                  server.online - server.online_auth);
-        msg_send(buffer, strlen(buffer), -1);
+        msg_send(buffer, strlen(buffer));
     }
 
     if(!server.online_auth && server.poweroff)
@@ -533,7 +530,7 @@ void* server_conn(void* t_data)
         {
             /* tell unauthenticated users that XDR has been powered off */
             sprintf(buffer, "X\n");
-            msg_send(buffer, strlen(buffer), -1);
+            msg_send(buffer, strlen(buffer));
         }
         server_log(LOG_INFO, "tuner shutdown");
         tuner_reset();
@@ -551,6 +548,7 @@ void serial_init(char* path)
         server_log(LOG_ERR, "serial_init: CreateFile");
         exit(EXIT_FAILURE);
     }
+
     DCB dcbSerialParams = {0};
     if(!GetCommState(server.serialfd, &dcbSerialParams))
     {
@@ -558,6 +556,7 @@ void serial_init(char* path)
         server_log(LOG_ERR, "serial_init: GetCommState");
         exit(EXIT_FAILURE);
     }
+
     dcbSerialParams.BaudRate = CBR_115200;
     dcbSerialParams.ByteSize = 8;
     dcbSerialParams.StopBits = ONESTOPBIT;
@@ -585,12 +584,14 @@ void serial_init(char* path)
         server_log(LOG_ERR, "serial_init: tcgetattr");
         exit(EXIT_FAILURE);
     }
+
     if(cfsetispeed(&options, B115200) || cfsetospeed(&options, B115200))
     {
         close(server.serialfd);
         server_log(LOG_ERR, "serial_init: cfsetspeed");
         exit(EXIT_FAILURE);
     }
+
     options.c_iflag &= ~(BRKINT | ICRNL | IXON | IMAXBEL);
     options.c_iflag |= IGNBRK;
     options.c_lflag &= ~(ICANON | ECHO | ECHOE | ISIG | IEXTEN | ECHOK | ECHOCTL | ECHOKE);
@@ -612,67 +613,48 @@ void serial_loop()
 {
     char buff[SERIAL_BUFFER];
     int pos = 0;
-
 #ifdef __WIN32__
-    DWORD len_in = 0;
+    DWORD state, len_in = 0;
     BOOL fWaitingOnRead = FALSE;
-    DWORD state;
     OVERLAPPED osReader = {0};
     osReader.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
-    if (osReader.hEvent == NULL)
+    if(osReader.hEvent == NULL)
     {
         server_log(LOG_ERR, "serial_loop: CreateEvent");
         exit(EXIT_FAILURE);
     }
-#else
-    fd_set input;
-#endif
-
-#ifdef __WIN32__
     while(1)
     {
-        if (!fWaitingOnRead)
+        if(!fWaitingOnRead)
         {
-            if (!ReadFile(server.serialfd, &buff[pos], 1, &len_in, &osReader))
+            if(!ReadFile(server.serialfd, &buff[pos], 1, &len_in, &osReader))
             {
-                if (GetLastError() != ERROR_IO_PENDING)
+                if(GetLastError() != ERROR_IO_PENDING)
                 {
                     CloseHandle(osReader.hEvent);
                     break;
                 }
                 else
-                {
                     fWaitingOnRead = TRUE;
-                }
             }
         }
-
-        if (fWaitingOnRead)
+        if(fWaitingOnRead)
         {
             state = WaitForSingleObject(osReader.hEvent, 200);
             if(state == WAIT_TIMEOUT)
-            {
                 continue;
-            }
-            if(state != WAIT_OBJECT_0)
+            if(state != WAIT_OBJECT_0 ||
+               !GetOverlappedResult(server.serialfd, &osReader, &len_in, FALSE))
             {
                 CloseHandle(osReader.hEvent);
                 break;
             }
-
-            if (!GetOverlappedResult(server.serialfd, &osReader, &len_in, FALSE))
-            {
-                CloseHandle(osReader.hEvent);
-                break;
-            }
-
             fWaitingOnRead = FALSE;
         }
         if(len_in != 1)
-        {
             continue;
-        }
 #else
+    fd_set input;
     FD_ZERO(&input);
     FD_SET(server.serialfd, &input);
     while(select(server.serialfd+1, &input, NULL, NULL, NULL) > 0)
@@ -680,21 +662,16 @@ void serial_loop()
         if(read(server.serialfd, &buff[pos], 1) <= 0)
             break;
 #endif
-        /* If this command is too long to
-         * fit into a buffer, clip it */
-        if(buff[pos] != '\n')
+        if(buff[pos] != '\n') /* If this command is too long to fit into a buffer, clip it */
         {
             if(pos != SERIAL_BUFFER-1)
                 pos++;
             continue;
         }
-
         buff[pos] = 0;
         msg_parse_serial(buff);
         buff[pos] = '\n';
-
-        msg_send(buff, pos+1, -1);
-
+        msg_send(buff, pos+1);
         pos = 0;
     }
 #ifdef __WIN32__
@@ -702,8 +679,6 @@ void serial_loop()
 #else
     close(server.serialfd);
 #endif
-    server_log(LOG_ERR, "serial_loop");
-    exit(EXIT_FAILURE);
 }
 
 void serial_write(char* msg, int len)
@@ -720,16 +695,10 @@ void serial_write(char* msg, int len)
         exit(EXIT_FAILURE);
     }
 
-    if (!WriteFile(server.serialfd, msg, len, &dwWritten, &osWrite))
-    {
-        if (GetLastError() == ERROR_IO_PENDING)
-        {
+    if(!WriteFile(server.serialfd, msg, len, &dwWritten, &osWrite))
+        if(GetLastError() == ERROR_IO_PENDING)
             if(WaitForSingleObject(osWrite.hEvent, INFINITE) == WAIT_OBJECT_0)
-            {
                 GetOverlappedResult(server.serialfd, &osWrite, &dwWritten, FALSE);
-            }
-        }
-    }
     CloseHandle(osWrite.hEvent);
 #else
     write(server.serialfd, msg, len);
@@ -831,7 +800,7 @@ void msg_parse_serial(char* msg)
     }
 }
 
-void msg_send(char* msg, int len, int ignore_fd)
+void msg_send(char* msg, int len)
 {
     int sent, n;
     user_t *u;
@@ -839,10 +808,6 @@ void msg_send(char* msg, int len, int ignore_fd)
     pthread_mutex_lock(&server.mutex);
     for(u = server.head; u; u=u->next)
     {
-        if(u->fd == ignore_fd)
-        {
-            continue;
-        }
         if(server.guest || u->auth)
         {
             sent = 0;
