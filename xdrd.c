@@ -117,7 +117,7 @@ void serial_loop();
 void serial_write(char*, int);
 user_t* user_add(server_t*, int, int);
 void user_remove(server_t*, user_t*);
-void msg_parse_serial(char*);
+void msg_parse_serial(char, char*);
 void msg_send(char*, int);
 char* auth_salt();
 int auth_hash(char*, char*, char*);
@@ -669,7 +669,8 @@ void serial_loop()
             continue;
         }
         buff[pos] = 0;
-        msg_parse_serial(buff);
+        if(pos)
+            msg_parse_serial(buff[0], buff+1);
         buff[pos] = '\n';
         msg_send(buff, pos+1);
         pos = 0;
@@ -750,52 +751,56 @@ void user_remove(server_t* LIST, user_t* USER)
     free(USER);
 }
 
-void msg_parse_serial(char* msg)
+void msg_parse_serial(char cmd, char* msg)
 {
-    switch(msg[0])
+    switch(cmd)
     {
     case XDR_P_SHUTDOWN:
         tuner_defaults();
         return;
 
     case XDR_P_MODE:
-        server.mode = atoi(msg+1);
+        server.mode = atoi(msg);
+        server.filter = XDR_P_FILTER_DEFAULT;
         return;
 
     case XDR_P_TUNE:
-        server.freq = atoi(msg+1);
+        server.freq = atoi(msg);
         return;
 
+    case XDR_P_FILTER:
+        server.filter = atoi(msg);
+
     case XDR_P_DAA:
-        server.daa = atoi(msg+1);
+        server.daa = atoi(msg);
         return;
 
     case XDR_P_DEEMPHASIS:
-        server.deemphasis = atoi(msg+1);
+        server.deemphasis = atoi(msg);
         return;
 
     case XDR_P_AGC:
-        server.agc = atoi(msg+1);
+        server.agc = atoi(msg);
         return;
 
     case XDR_P_GAIN:
-        server.gain = atoi(msg+1);
+        server.gain = atoi(msg);
         return;
 
     case XDR_P_SQUELCH:
-        server.squelch = atoi(msg+1);
+        server.squelch = atoi(msg);
         return;
 
     case XDR_P_VOLUME:
-        server.volume = atoi(msg+1);
+        server.volume = atoi(msg);
         return;
 
     case XDR_P_ANTENNA:
-        server.ant = atoi(msg+1);
+        server.ant = atoi(msg);
         return;
 
     case XDR_P_ROTATOR:
-        server.rotator = atoi(msg+1);
+        server.rotator = atoi(msg);
         return;
     }
 }
