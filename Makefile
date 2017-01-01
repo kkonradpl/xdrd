@@ -11,6 +11,7 @@ BINDIR = $(PREFIX)/bin
 xdrd:	xdrd.o
 	$(CC) -o $(TARGET) xdrd.o $(LIBS)
 
+.PHONY:	windows
 windows:	xdrd.o
 	$(CC) -o $(TARGET) xdrd.o $(LIBS_WIN)
 

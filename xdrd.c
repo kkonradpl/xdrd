@@ -1,5 +1,5 @@
 /*
- *  xdrd 1.0
+ *  xdrd 1.0-git
  *  Copyright (C) 2013-2016  Konrad Kosmatka
  *  http://fmdx.pl/
 
@@ -24,6 +24,7 @@
 #define LOG_ERR  0
 #define LOG_INFO 1
 #define DEFAULT_SERIAL "COM3"
+#define BACKGROUND_EXEC "START /MIN cmd /c "
 #endif
 
 #include <stdlib.h>
@@ -51,7 +52,7 @@
 #define DEFAULT_SERIAL "/dev/ttyUSB0"
 #endif
 
-#define VERSION       "1.0"
+#define VERSION       "1.0-git"
 #define DEFAULT_USERS 10
 #define SERIAL_BUFFER 8192
 
@@ -77,6 +78,9 @@ typedef struct server
     char* password; // server password
     int maxusers; // number of allowed users at the same time
     int poweroff; // power tuner off when nobody is connected
+
+    char* f_exec; // command to run after first user has connected
+    char* l_exec; // command to run after last user has disconnected
 
     int online; // online users counter
     int online_auth;
@@ -109,6 +113,7 @@ server_t server;
 
 void show_usage(char*);
 void server_log(int prio, char* msg, ...);
+char* prepare_cmd(const char*);
 void server_init(int);
 void* server_thread(void*);
 void* server_conn(void*);
@@ -135,6 +140,8 @@ int main(int argc, char* argv[])
     server.guest = 0;
     server.password = NULL;
     server.maxusers = DEFAULT_USERS;
+    server.f_exec = NULL;
+    server.l_exec = NULL;
     server.online = 0;
     server.online_auth = 0;
     server.head = NULL;
@@ -157,7 +164,7 @@ int main(int argc, char* argv[])
     }
 #endif
 
-    while((c = getopt(argc, argv, "hbgxt:s:u:p:")) != -1)
+    while((c = getopt(argc, argv, "hbgxt:s:u:p:f:l:")) != -1)
     {
         switch(c)
         {
@@ -196,6 +203,14 @@ int main(int argc, char* argv[])
 
         case 'p':
             server.password = optarg;
+            break;
+
+        case 'f':
+            server.f_exec = prepare_cmd(optarg);
+            break;
+
+        case 'l':
+            server.l_exec = prepare_cmd(optarg);
             break;
 
         case ':':
@@ -263,10 +278,13 @@ int main(int argc, char* argv[])
 void show_usage(char* arg)
 {
     printf("xdrd " VERSION "\n");
+    printf("usage:\n");
+    printf("%s [ -s serial ] [ -t port ] [ -u users ]\n", arg);
+    printf("%*s [ -p password ] [ -f command ] [ -l command ]\n", (int)strlen(arg), "");
 #ifndef __WIN32__
-    printf("usage: %s [ -s serial ] [ -t port ] [ -u users ] [ -p password ] [ -hgxb ]\n", arg);
+    printf("%*s [ -hgxb ]\n", (int)strlen(arg), "");
 #else
-    printf("usage: %s [ -s serial ] [ -t port ] [ -u users ] [ -p password ] [ -hgx ]\n", arg);
+    printf("%*s [ -hgx ]\n", (int)strlen(arg), "");
 #endif
     printf("options:\n");
     printf("  -s  serial port (default %s)\n", DEFAULT_SERIAL);
@@ -275,7 +293,9 @@ void show_usage(char* arg)
     printf("  -p  specify password (required)\n");
     printf("  -h  show this help list\n");
     printf("  -g  allow guest login (read-only access)\n");
-    printf("  -x  power the tuner off when nobody is connected\n");
+    printf("  -x  power the tuner off after last user has disconnected\n");
+    printf("  -f  execute the specified command after first user has connected\n");
+    printf("  -l  execute the specified command after last user has disconnected\n");
 #ifndef __WIN32__
     printf("  -b  run server in the background\n");
 #endif
@@ -308,6 +328,25 @@ void server_log(int prio, char* msg, ...)
         }
     }
     va_end(myargs);
+}
+
+char* prepare_cmd(const char* cmd)
+{
+    char* buff;
+    int len;
+#ifdef __WIN32__
+    len = strlen(BACKGROUND_EXEC) + strlen(cmd) + 1;
+    buff = malloc(len);
+    memcpy(buff, BACKGROUND_EXEC, strlen(BACKGROUND_EXEC));
+    memcpy(buff+strlen(BACKGROUND_EXEC), cmd, strlen(cmd));
+#else
+    len = strlen(cmd) + 1 + 1;
+    buff = malloc(len);
+    memcpy(buff, cmd, strlen(cmd));
+    buff[len-1] = '&';
+#endif
+    buff[len] = '\0';
+    return buff;
 }
 
 void server_init(int port)
@@ -723,8 +762,14 @@ user_t* user_add(server_t* LIST, int fd, int auth)
     LIST->head = u;
     LIST->online++;
     LIST->online_auth += auth;
-    pthread_mutex_unlock(&LIST->mutex);
 
+    if(server.f_exec && LIST->online_auth == 1)
+    {
+        server_log(LOG_INFO, "executing: %s", server.f_exec);
+        system(server.f_exec);
+    }
+
+    pthread_mutex_unlock(&LIST->mutex);
     return u;
 }
 
@@ -745,8 +790,14 @@ void user_remove(server_t* LIST, user_t* USER)
     }
     LIST->online--;
     LIST->online_auth -= USER->auth;
-    pthread_mutex_unlock(&LIST->mutex);
 
+    if(server.l_exec && LIST->online_auth == 0)
+    {
+        server_log(LOG_INFO, "executing: %s", server.l_exec);
+        system(server.l_exec);
+    }
+
+    pthread_mutex_unlock(&LIST->mutex);
     socket_close(USER->fd);
     free(USER);
 }
