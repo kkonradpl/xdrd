@@ -39,6 +39,10 @@
 #define XDR_P_ROTATOR 'C'
 #define XDR_P_ROTATOR_DEFAULT 0
 
+#define XDR_P_INTERVAL 'I'
+#define XDR_P_SAMPLING_DEFAULT 0
+#define XDR_P_DETECTOR_DEFAULT 0
+
 #define XDR_P_PI  'P'
 #define XDR_P_RDS 'R'
 

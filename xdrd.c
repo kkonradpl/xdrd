@@ -97,6 +97,8 @@ typedef struct server
     int daa;
     int squelch;
     int rotator;
+    int sampling;
+    int detector;
 
     user_t* head;
 } server_t;
@@ -504,7 +506,7 @@ void* server_conn(void* t_data)
     if(server.online_auth)
     {
         snprintf(buffer, sizeof(buffer),
-                 "M%d\nY%d\nT%d\nD%d\nA%d\nF%d\nZ%d\nG%02d\nV%d\nQ%d\nC%d\n",
+                 "M%d\nY%d\nT%d\nD%d\nA%d\nF%d\nZ%d\nG%02d\nV%d\nQ%d\nC%d\nI%d,%d\n",
                  server.mode,
                  server.volume,
                  server.freq,
@@ -515,7 +517,9 @@ void* server_conn(void* t_data)
                  server.gain,
                  server.daa,
                  server.squelch,
-                 server.rotator);
+                 server.rotator,
+                 server.sampling,
+                 server.detector);
         send(connfd, buffer, strlen(buffer), MSG_NOSIGNAL);
     }
 
@@ -804,6 +808,7 @@ void user_remove(server_t* LIST, user_t* USER)
 
 void msg_parse_serial(char cmd, char* msg)
 {
+    char *ptr;
     switch(cmd)
     {
     case XDR_P_SHUTDOWN:
@@ -852,6 +857,18 @@ void msg_parse_serial(char cmd, char* msg)
 
     case XDR_P_ROTATOR:
         server.rotator = atoi(msg);
+        return;
+
+    case XDR_P_INTERVAL:
+        server.sampling = atoi(msg);
+        for(ptr = msg; *ptr != '\0'; ptr++)
+        {
+            if(*ptr == ',')
+            {
+                server.detector = (*(ptr+1) == '1');
+                break;
+            }
+        }
         return;
     }
 }
@@ -937,6 +954,8 @@ void tuner_defaults()
     server.daa = XDR_P_DAA_DEFAULT;
     server.squelch = XDR_P_SQUELCH_DEFAULT;
     server.rotator = XDR_P_ROTATOR_DEFAULT;
+    server.sampling = XDR_P_SAMPLING_DEFAULT;
+    server.detector = XDR_P_DETECTOR_DEFAULT;
 }
 
 void tuner_reset()
