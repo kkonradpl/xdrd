@@ -253,6 +253,14 @@ int main(int argc, char* argv[])
             exit(EXIT_SUCCESS);
         }
 
+        if(open("/dev/null", O_RDONLY) == -1 ||
+           open("/dev/null", O_WRONLY) == -1 ||
+           open("/dev/null", O_RDWR) == -1)
+        {
+            server_log(LOG_ERR, "open /dev/null");
+            exit(EXIT_FAILURE);
+        }
+
         if(setsid() < 0)
         {
             server_log(LOG_ERR, "setsid");
@@ -357,7 +365,11 @@ void server_init(int port)
     struct sockaddr_in addr;
     pthread_t thread;
 
+#ifdef __WIN32__
     if((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
+#else
+    if((sockfd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)) < 0)
+#endif
     {
         server_log(LOG_ERR, "server_init: socket");
         exit(EXIT_FAILURE);
@@ -414,7 +426,11 @@ void* server_thread(void* sockfd)
         exit(EXIT_FAILURE);
     }
 
+#ifdef __WIN32__
     while((connfd = accept((int)(intptr_t)sockfd, (struct sockaddr *)&dest, &dest_size)) >= 0)
+#else
+    while((connfd = accept4((int)(intptr_t)sockfd, (struct sockaddr *)&dest, &dest_size, SOCK_CLOEXEC)) >= 0)
+#endif
     {
         if(server.online >= server.maxusers)
         {
@@ -611,7 +627,7 @@ void serial_init(char* path)
         exit(EXIT_FAILURE);
     }
 #else
-    if((server.serialfd = open(path, O_RDWR | O_NOCTTY | O_NDELAY)) < 0)
+    if((server.serialfd = open(path, O_RDWR | O_NOCTTY | O_NDELAY | O_CLOEXEC)) < 0)
     {
         server_log(LOG_ERR, "serial_init: open");
         exit(EXIT_FAILURE);
