@@ -1,6 +1,6 @@
 /*
  *  xdrd 1.0-git
- *  Copyright (C) 2013-2016  Konrad Kosmatka
+ *  Copyright (C) 2013-2017  Konrad Kosmatka
  *  http://fmdx.pl/
 
  *  This program is free software; you can redistribute it and/or
@@ -924,9 +924,9 @@ char* auth_salt()
     char* output;
     int i;
 
-    if(!RAND_pseudo_bytes(random_data, sizeof(random_data)))
+    if(!RAND_bytes(random_data, sizeof(random_data)))
     {
-        server_log(LOG_ERR, "RAND_pseudo_bytes failed!");
+        server_log(LOG_ERR, "RAND_bytes failed!");
         return NULL;
     }
 
