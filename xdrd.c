@@ -27,6 +27,7 @@
 #define BACKGROUND_EXEC "START /MIN cmd /c "
 #endif
 
+#define _GNU_SOURCE
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdarg.h>
