@@ -1,6 +1,6 @@
 /*
  *  xdrd 1.0-git
- *  Copyright (C) 2013-2017  Konrad Kosmatka
+ *  Copyright (C) 2013-2023  Konrad Kosmatka
  *  http://fmdx.pl/
 
  *  This program is free software; you can redistribute it and/or
@@ -39,6 +39,7 @@
 #include <pthread.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#define OPENSSL_API_COMPAT 0x10100000L
 #include <openssl/rand.h>
 #include <openssl/sha.h>
 #include "xdr-protocol.h"
