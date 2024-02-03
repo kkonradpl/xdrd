@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -Wall -pedantic -std=c99 -c -O2 -D_GNU_SOURCE
+CFLAGS = -Wall -pedantic -std=c99 -c -O2
 LIBS = -lpthread -lcrypto
 LIBS_WIN = $(LIBS) -lws2_32
 INSTALL = install -c
