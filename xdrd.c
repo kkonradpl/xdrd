@@ -160,6 +160,19 @@ int main(int argc, char* argv[])
         server_log(LOG_ERR, "main: WSAStartup");
         exit(EXIT_FAILURE);
     }
+
+    /* Disable the console quick edit feature */
+    HANDLE consoleHandle = GetStdHandle(STD_INPUT_HANDLE);
+    if (consoleHandle)
+    {
+        DWORD consoleMode;
+        if (GetConsoleMode(consoleHandle, &consoleMode))
+        {
+            const DWORD quick_edit = 0x40;
+            consoleMode &= ~quick_edit;
+            SetConsoleMode(consoleHandle, consoleMode);
+        }
+    }
 #else
     if(getuid() == 0)
     {
