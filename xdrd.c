@@ -94,6 +94,7 @@ typedef struct server
     int deemphasis;
     int agc;
     int filter;
+    int bandwidth;
     int ant;
     int gain;
     int daa;
@@ -537,13 +538,14 @@ void* server_conn(void* t_data)
     if(server.online_auth)
     {
         snprintf(buffer, sizeof(buffer),
-                 "M%d\nY%d\nT%d\nD%d\nA%d\nF%d\nZ%d\nG%02d\nV%d\nQ%d\nC%d\nI%d,%d\n",
+                 "M%d\nY%d\nT%d\nD%d\nA%d\n%c%d\nZ%d\nG%02d\nV%d\nQ%d\nC%d\nI%d,%d\n",
                  server.mode,
                  server.volume,
                  server.freq,
                  server.deemphasis,
                  server.agc,
-                 server.filter,
+                 (server.bandwidth != XDR_P_BANDWIDTH_INVALID ? XDR_P_BANDWIDTH : XDR_P_FILTER),
+                 (server.bandwidth != XDR_P_BANDWIDTH_INVALID ? server.bandwidth : server.filter),
                  server.ant,
                  server.gain,
                  server.daa,
@@ -849,6 +851,16 @@ void msg_parse_serial(char cmd, char* msg)
     case XDR_P_MODE:
         server.mode = atoi(msg);
         server.filter = XDR_P_FILTER_DEFAULT;
+
+        if (server.bandwidth != XDR_P_BANDWIDTH_INVALID)
+        {
+            server.bandwidth = XDR_P_BANDWIDTH_DEFAULT;
+        }
+        else
+        {
+            server.filter = XDR_P_FILTER_DEFAULT;
+        }
+
         return;
 
     case XDR_P_TUNE:
@@ -857,6 +869,12 @@ void msg_parse_serial(char cmd, char* msg)
 
     case XDR_P_FILTER:
         server.filter = atoi(msg);
+        server.bandwidth = XDR_P_BANDWIDTH_INVALID;
+        return;
+
+    case XDR_P_BANDWIDTH:
+        server.bandwidth = atoi(msg);
+        return;
 
     case XDR_P_DAA:
         server.daa = atoi(msg);
@@ -980,6 +998,7 @@ void tuner_defaults()
     server.deemphasis = XDR_P_DEEMPHASIS_DEFAULT;
     server.agc = XDR_P_AGC_DEFAULT;
     server.filter = XDR_P_FILTER_DEFAULT;
+    server.bandwidth = XDR_P_BANDWIDTH_INVALID;
     server.ant = XDR_P_ANTENNA_DEFAULT;
     server.gain = XDR_P_GAIN_DEFAULT;
     server.daa = XDR_P_DAA_DEFAULT;
