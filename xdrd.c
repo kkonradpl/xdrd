@@ -2,7 +2,7 @@
  *  xdrd 1.0-git
  *  Copyright (C) 2013-2023  Konrad Kosmatka
  *  http://fmdx.pl/
-
+ 
  *  This program is free software; you can redistribute it and/or
  *  modify it under the terms of the GNU General Public License
  *  as published by the Free Software Foundation; either version 2
@@ -13,6 +13,26 @@
  *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  *  GNU General Public License for more details.
  */
+
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE
+#endif
+
+#if defined(__APPLE__)
+#ifndef SOCK_CLOEXEC
+#define SOCK_CLOEXEC 0  /* macOS doesn't support SOCK_CLOEXEC natively */
+#endif
+
+#ifndef accept4
+/* Provide a trivial accept4() that just calls accept() on macOS. */
+#include <sys/socket.h>
+static inline int accept4(int fd, struct sockaddr *addr, socklen_t *len, int flags)
+{
+    (void)flags; /* no effect on macOS */
+    return accept(fd, addr, len);
+}
+#endif
+#endif
 
 #ifdef __WIN32__
 #define _WIN32_WINNT 0x0501
@@ -52,6 +72,10 @@
 #include <sys/select.h>
 #include <sys/ioctl.h>
 #define DEFAULT_SERIAL "/dev/ttyUSB0"
+#endif
+
+#ifdef __APPLE__
+    #define SOCK_CLOEXEC 0  // macOS doesn't support SOCK_CLOEXEC natively
 #endif
 
 #define VERSION       "1.0-git"
@@ -378,26 +402,40 @@ char* prepare_cmd(const char* cmd)
 void server_init(int port)
 {
     int sockfd;
-    struct sockaddr_in addr;
+
+    /*
+     * FIX: We declare these so we can reference them on macOS
+     * if we want to "use regular accept on macOS".
+     */
+    int connfd;
+    struct sockaddr_in addr, dest;
+    socklen_t dest_size = sizeof(dest);
+
     pthread_t thread;
 
 #ifdef __WIN32__
     if((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
+    {
+        server_log(LOG_ERR, "server_init: socket");
+        exit(EXIT_FAILURE);
+    }
 #else
     if((sockfd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)) < 0)
-#endif
     {
         server_log(LOG_ERR, "server_init: socket");
         exit(EXIT_FAILURE);
     }
 
-#ifndef __WIN32__
     int value = 1;
     if(setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, (const char*)&value, sizeof(value)) < 0)
     {
         server_log(LOG_ERR, "server_init: SO_REUSEADDR");
         exit(EXIT_FAILURE);
     }
+#endif
+
+#ifdef __APPLE__
+    connfd = accept(sockfd, (struct sockaddr *)&dest, &dest_size);
 #endif
 
     memset((char*)&addr, 0, sizeof(addr));
@@ -685,7 +723,7 @@ void serial_init(char* path)
     tuner_reset();
 }
 
-void serial_loop()
+void serial_loop(void)
 {
     char buff[SERIAL_BUFFER];
     int pos = 0;
@@ -949,7 +987,7 @@ void msg_send(char* msg, int len)
     pthread_mutex_unlock(&server.mutex);
 }
 
-char* auth_salt()
+char* auth_salt(void)
 {
     static const char chars[] = "QWERTYUIOPASDFGHJKLZXCVBNMqwertyuiopasdfghjklzxcvbnm0123456789_-";
     const int len = strlen(chars);
@@ -990,7 +1028,7 @@ int auth_hash(char* salt, char* password, char* hash)
     return (strcasecmp(hash, sha_string) == 0);
 }
 
-void tuner_defaults()
+void tuner_defaults(void)
 {
     server.mode = XDR_P_MODE_DEFAULT;
     server.volume = XDR_P_VOLUME_DEFAULT;
@@ -1008,7 +1046,7 @@ void tuner_defaults()
     server.detector = XDR_P_DETECTOR_DEFAULT;
 }
 
-void tuner_reset()
+void tuner_reset(void)
 {
     /* restart Arduino using RTS & DTR lines */
     pthread_mutex_lock(&server.mutex_s);
